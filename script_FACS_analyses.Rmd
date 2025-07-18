@@ -1,0 +1,463 @@
+---
+title: "Untitled"
+author: "Dogus Altintas"
+date: "2025-04-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(flowCore)
+library(ggcyto)
+library(ggplot2)
+library(stringr)
+
+
+setwd("/Users/daltinta/Library/Mobile Documents/com~apple~CloudDocs/Lab files/Comoglio/Manuscripts/MET Fusion partners/Surface MET cell lines/altintas160425PE")
+
+# Load and transform FCS file
+fs <- read.flowSet(path = "/Users/daltinta/Library/Mobile Documents/com~apple~CloudDocs/Lab files/Comoglio/Manuscripts/MET Fusion partners/Surface MET cell lines/altintas160425PE/fcs", pattern = ".fcs")
+
+# Convert to a GatingSet (optional but useful for plotting)
+gs <- GatingSet(fs)
+
+# Get sample names from file names
+sample_names <- sampleNames(gs)
+
+# Remove prefixes like "altintas160425PE_Group_XX" if present
+clean_names <- str_remove(sample_names, "altintas160425PE_Group_\\d+\\s*")
+
+
+# Now extract CellLine and Time
+meta_df <- data.frame(
+  name = sample_names,
+  File = sample_names,
+  CellLine = str_extract(clean_names, "^[A-Za-z0-9]+"),               # first word is cell line
+  Time = str_extract(clean_names, "\\d+(\\.\\d+)?h")                  # match time like 0.5h or 2h
+)
+
+# Fill in NA times with "Control"
+meta_df$Time[is.na(meta_df$Time)] <- "Control"
+
+
+# Set rownames of meta_df to match sampleNames(gs)
+rownames(meta_df) <- meta_df$name
+
+# Attach metadata to the pData slot
+pData(gs) <- meta_df
+
+trans <- estimateLogicle(gs[[1]], channels = c("YL1-A"))
+gs_trans <- transform(gs, trans)
+
+# View FSC-A vs SSC-A to find viable region
+autoplot(fs[[1]], x = "FSC-A", y = "SSC-A")
+
+# Define your gate (adjust coordinates based on plot)
+gate_fsc_ssc <- rectangleGate(
+  filterId = "Cells",
+  "FSC-A" = c(400000, 950000),
+  "SSC-A" = c(150000, 500000)
+)
+
+# Apply it to your flowSet or a single sample
+fs_gated <- Subset(fs, gate_fsc_ssc)
+
+autoplot(fs[[1]], x = "FSC-A", y = "SSC-A") + 
+  geom_gate(gate_fsc_ssc)
+
+
+```
+
+## RDoublet exclusion
+
+
+```{r}
+# Plot to assess singlet region
+autoplot(fs_gated[[1]], x = "FSC-A", y = "FSC-H")
+
+
+poly_coords <- matrix(c(
+  600000, 240000,
+  800000, 260000,
+  950000, 300000,
+  950000, 350000,
+  700000, 350000,
+  450000, 270000,
+  450000, 240000
+), ncol = 2, byrow = TRUE)
+
+colnames(poly_coords) <- c("FSC-A", "FSC-H")
+
+# Create polygon gate
+gate_singlets <- polygonGate(
+  .gate = poly_coords,
+  filterId = "Singlets"
+)
+
+autoplot(fs_gated[[1]], x = "FSC-A", y = "FSC-H") +
+   geom_gate(gate_singlets)
+
+fs_singlets <- Subset(fs_gated, gate_singlets)
+
+
+```
+
+
+```{r}
+# Install if needed
+if (!requireNamespace("flowDensity", quietly = TRUE)) {
+    BiocManager::install("flowDensity")
+}
+
+library(flowCore)
+library(flowDensity)
+
+# Example: apply to one sample first
+sample <- fs_gated[[1]]  # Already debris-cleaned
+exprs(sample)[1:5, ]  # Peek at data
+
+# Apply density-based gating for singlets (FSC-H vs FSC-A)
+singlet_gate <- flowDensity(
+  obj = sample,
+  channels = c("FSC-A", "FSC-H"),
+  position = c(TRUE, TRUE),  # TRUE = upper side of the peak
+  gates = c(NA, NA),         # NA = auto-generate cutoffs
+  useGate = FALSE            # build new gate from scratch
+)
+
+# Visualize
+plotDens(sample, channels = c("FSC-A", "FSC-H"))
+polygon(singlet_gate@filter, col = rgb(1, 0, 0, 0.3))
+
+```
+
+
+
+### Auto gating
+
+```{r}
+# Install if needed
+if (!requireNamespace("flowDensity", quietly = TRUE)) {
+    BiocManager::install("flowDensity")
+}
+
+library(flowCore)
+library(flowDensity)
+
+# Example: apply to one sample first
+sample <- fs_gated[[1]]  # Already debris-cleaned
+exprs(sample)[1:5, ]  # Peek at data
+
+# Apply density-based gating for singlets (FSC-H vs FSC-A)
+library(flowDensity)
+
+# Assume sample is already debris-cleaned (FSC-SSC gated)
+singlet_gate <- flowDensity(
+  obj = sample,
+  channels = c("FSC-A", "FSC-H"),
+  position = c(NA, FALSE),   # slice based on FSC-H only (upper tail exclusion)
+  gates = c(NA, NA),         # let flowDensity decide the thresholds
+  ellip.gate = TRUE          # enables elliptical gate following the dense cloud
+)
+
+
+# Visualize
+plotDens(sample, channels = c("FSC-A", "FSC-H"))
+polygon(singlet_gate@filter, col = rgb(1, 0, 0, 0.3), border = "red")
+
+
+fs_singlets <- fsApply(fs_gated, function(sample) {
+  gate <- flowDensity(
+    obj = sample,
+    channels = c("FSC-A", "FSC-H"),
+    position = c(NA, FALSE),
+    ellip.gate = TRUE
+  )
+
+  # Convert to polygonGate object
+  pgate <- polygonGate(.gate = gate@filter, filterId = "Singlets")
+
+  # Apply the polygonGate using flowCore::Subset
+  Subset(sample, pgate)
+})
+
+# Make sure the sample order hasn't changed
+sampleNames(fs_singlets)
+sampleNames(fs_gated)
+
+# If they're in the same order, just copy metadata directly
+pData(fs_singlets) <- pData(fs_gated)
+
+
+library(stringr)
+
+# Get sample names
+sample_names <- sampleNames(fs_singlets)
+
+# Remove prefixes like "altintas160425PE_Group_XX" if present
+clean_names <- str_remove(sample_names, "altintas160425PE_Group_\\d+\\s*")
+
+
+# Now extract CellLine and Time
+meta_df <- data.frame(
+  name = sample_names,
+  File = sample_names,
+  CellLine = str_extract(clean_names, "^[A-Za-z0-9]+"),               # first word is cell line
+  Time = str_extract(clean_names, "\\d+(\\.\\d+)?h")                  # match time like 0.5h or 2h
+)
+
+
+
+# Handle controls with missing time
+meta_df$Time[is.na(meta_df$Time)] <- "Control"
+
+# Make sure CellLine was extracted from non-Control too
+meta_df$CellLine[is.na(meta_df$CellLine)] <- str_extract(meta_df$name[is.na(meta_df$CellLine)], "(?<=Group_\\d+\\s)[A-Za-z0-9]+")
+
+# Reorder time levels for correct plotting
+meta_df$Time <- factor(meta_df$Time, levels = c("Control", "0h", "0.5h", "1h", "2h", "4h"))
+
+# Set row names to match sampleNames
+rownames(meta_df) <- meta_df$name
+
+pData(fs_singlets) <- meta_df
+
+
+library(ggcyto)
+
+ggcyto(fs_singlets, aes(x = `YL1-A`, color = Time)) +
+  geom_density() +
+  facet_wrap(~ CellLine, scales = "free_y") +
+  theme_minimal() +
+  labs(
+    title = "MET Surface Expression (Singlet-Gated)",
+    x = "PE Fluorescence (YL1-A)",
+    y = "Density"
+  ) +
+  scale_color_brewer(palette = "Set1") +xlim(0,50000)
+
+
+# Extract 0h samples
+fs_0h <- fs_singlets[pData(fs_singlets)$Time == "0h", ]
+
+# Build a clean dataframe for ggplot
+plot_df <- do.call(rbind, lapply(sampleNames(fs_0h), function(s) {
+  expr <- exprs(fs_0h[[s]])[, "YL1-A"]
+  cellline <- pData(fs_0h)[s, "CellLine"]
+  data.frame(
+    CellLine = cellline,
+    Fluorescence = expr
+  )
+}))
+
+
+library(ggplot2)
+
+ggplot(plot_df, aes(x = Fluorescence, color = CellLine, fill = CellLine)) +
+  geom_density(alpha = 0.2, size = 1) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "MET Surface Expression at 0h (Singlet-Gated)",
+    x = "PE Fluorescence (YL1-A)",
+    y = "Density"
+  ) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  theme(
+    legend.title = element_blank(),  # remove "CellLine" label from legend
+    legend.position = "right"
+  )
+
+
+
+```
+
+```{r}
+plot_df$CorrectedFluorescence <- with(plot_df, ifelse(
+  CellLine == "JHUEM", Fluorescence * 2,
+  ifelse(CellLine == "LN405", Fluorescence * 3,
+  ifelse(CellLine == "SW756", Fluorescence * 3,
+  Fluorescence)))  # A172 stays unchanged
+)
+
+plot_df$CellLine <- recode(plot_df$CellLine, "JHUEM" = "JHUEM7")
+
+plot_df$CellLine <- factor(plot_df$CellLine, levels = c("A172", "LN405", "JHUEM7", "SW756"))
+
+
+library(dplyr)
+
+
+medians_df <- plot_df %>%
+  group_by(CellLine) %>%
+  summarize(Median_Fluorescence = round(median(CorrectedFluorescence[CorrectedFluorescence > 0]), 1))
+
+
+
+p <- ggplot(plot_df, aes(x = CorrectedFluorescence, color = CellLine, fill = CellLine)) +
+  geom_density(alpha = 0.2, size = 1) +
+  theme_bw(base_size = 14) +
+  # 🔧 Use correct column name here:
+  geom_vline(data = medians_df, aes(xintercept = Median_Fluorescence, color = CellLine),
+             linetype = "dashed", size = 0.8, show.legend = FALSE) +
+  labs(
+    title = "Surface MET Levels at 0h",
+    x = "PE Fluorescence (Surface MET)",
+    y = "Density"
+  ) +
+  scale_color_manual(values = c(
+    "A172" = "#66c2a5",   # original greenish
+    "LN405" = "#8da0cb",  # original purple-blue
+    "JHUEM7" = "#fc8d62",  # original orange
+    "SW756" = "#e78ac3"   # original pink
+  )) +
+  scale_fill_manual(values = c(
+    "A172" = "#66c2a5",
+    "LN405" = "#8da0cb",
+    "JHUEM7" = "#fc8d62",
+    "SW756" = "#e78ac3"
+  )) +
+  coord_cartesian(xlim = c(0, 100000)) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(face = "italic", size=12, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold"),
+    
+    legend.title = element_blank(),
+    legend.position = "right"
+  )
+
+
+ggsave("/Users/daltinta/Library/Mobile Documents/com~apple~CloudDocs/Lab files/Comoglio/Manuscripts/MET Fusion partners/Surface MET cell lines/altintas160425PE/density_t0.png", plot = p, width = 8, height = 8, dpi = 600)
+
+
+```
+
+## Evolution surface MET over time
+
+
+```{r a172 t=0 reference}
+library(tidyverse)
+
+# Input table
+fold_df <- tribble(
+  ~Time, ~A172, ~LN405, ~JHUEM7, ~SW756,
+  0,    1,       1.04473963, 5.25037975, 4.48000996,
+  0.5,  0.61226874, 0.70339885, 3.9563915, 3.31904951,
+  1,    0.24265855, 0.44591981, 3.22559874, 2.78322195,
+  2,    0.05891488, 0.17997143, 2.51975955, 2.62013783,
+  4,    0.02830507, 0.05915989, 2.24182146, 2.19563631
+)
+
+# Pivot to long format
+fold_long <- pivot_longer(fold_df, cols = -Time,
+                          names_to = "CellLine", values_to = "FoldChange")
+
+kinetics <- ggplot(fold_long, aes(x = Time, y = FoldChange, color = CellLine, shape = CellLine)) +
+ stat_smooth(method = "glm", method.args = list(family = gaussian(link = "log")),
+              se = FALSE, size = 1) +
+  geom_point(size = 3) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Fold Change in Surface MET After HGF Treatment",
+    x = "Time after 50 ng/mL HGF (h)",
+    y = "Fold change over MET wt (A172)"
+  ) +
+  scale_color_manual(values = c(
+    "A172" = "#66c2a5",
+    "LN405" = "#8da0cb",
+    "JHUEM7" = "#fc8d62",
+    "SW756" = "#e78ac3"  # assuming you want to keep "SW456" as the name from your data
+  )) +
+  scale_shape_manual(values = c(
+    "A172" = 16,   # circle
+    "LN405" = 15,  # square
+    "JHUEM7" = 17, # triangle
+    "SW756" = 18   # diamond
+  )) +
+   theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(face = "italic", size=12, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold"),
+    
+    legend.title = element_blank(),
+    legend.position = "right"
+  )
+
+ggsave("/Users/daltinta/Library/Mobile Documents/com~apple~CloudDocs/Lab files/Comoglio/Manuscripts/MET Fusion partners/Surface MET cell lines/altintas160425PE/kinetics.png", plot = kinetics, width = 8, height = 8, dpi = 600)
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+
+library(minpack.lm)
+
+# Function to fit exponential decay
+fit_exp_model <- function(df) {
+  tryCatch(
+    {
+      fit <- nlsLM(FoldChange ~ a * exp(-b * Time) + c,
+                   data = df,
+                   start = list(a = max(df$FoldChange) - min(df$FoldChange), b = 1, c = min(df$FoldChange)))
+      df$Fitted <- predict(fit)
+      df
+    },
+    error = function(e) {
+      df$Fitted <- NA
+      df
+    }
+  )
+}
+
+# Apply per CellLine
+exp_fits <- fold_long %>%
+  group_by(CellLine) %>%
+  group_modify(~ fit_exp_model(.x))
+
+fold_long$CellLine <- factor(fold_long$CellLine, levels = c("A172", "LN405", "JHUEM7", "SW756"))
+
+kinetics <- ggplot(fold_long, aes(x = Time, y = FoldChange, color = CellLine, shape = CellLine)) +
+  geom_line(size = 1) +
+  geom_point(size = 3) +
+  theme_bw(base_size = 14) +
+  labs(
+    title = "Surface MET after HGF Treatment",
+    x = "Time after 50 ng/mL HGF (h)",
+    y = "Fold change over MET wt (A172)"
+  ) +
+  scale_color_manual(values = c(
+    "A172"   = "#66c2a5",   # green
+    "LN405"  = "#8da0cb",   # blue
+    "JHUEM7" = "#fc8d62",   # orange
+    "SW756"  = "#e78ac3"    # pink
+  )) +
+  scale_shape_manual(values = c(
+    "A172"   = 16,   # circle
+    "LN405"  = 15,   # square
+    "JHUEM7" = 17,   # triangle
+    "SW756"  = 18    # diamond
+  )) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(face = "italic", size = 12, hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold"),
+    legend.title = element_blank(),
+    legend.position = "right"
+  )
+
+ggsave("/Users/daltinta/Library/Mobile Documents/com~apple~CloudDocs/Lab files/Comoglio/Manuscripts/MET Fusion partners/Surface MET cell lines/altintas160425PE/kinetics.png", plot = kinetics, width = 8, height = 8, dpi = 600)
+
+
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

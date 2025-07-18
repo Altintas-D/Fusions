@@ -1,0 +1,882 @@
+---
+title: "Script for figures"
+author: "Dogus Altintas"
+date: "2025-07-04"
+output: html_document
+---
+
+# Libraries
+
+```{r}
+library(tidyverse)
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(biomaRt)
+library(readr)
+library(RColorBrewer)
+library(forcats)
+library(ggpubr)
+
+
+setwd("/Users/dogusaltintas/Library/Mobile Documents/com~apple~CloudDocs/Lab files/Comoglio/Manuscripts/MET Fusion partners/Manuscript Fusion/Figures/Figures Clean/Raw scripts for Figures")
+```
+# Load the data
+
+```{r}
+# Load the fusion table (adjust path as needed)
+fusion_data <- read_tsv("table_fusions_MET_GENIE_v17_150425.tsv")
+```
+```{r}
+# Define helper flags
+fusion_data <- fusion_data %>%
+  mutate(
+    MET_is_Gene1 = toupper(`Gene 1`) == "MET",
+    MET_is_Gene2 = toupper(`Gene 2`) == "MET"
+  ) %>%
+  filter(MET_is_Gene1 | MET_is_Gene2)
+
+
+# Extract MET breakpoint and chromosome depending on which gene is MET
+fusion_data <- fusion_data %>%
+  mutate(
+    MET_Chromosome = case_when(
+      MET_is_Gene1 ~ as.character(`Site1 Chromosome`),
+      MET_is_Gene2 ~ as.character(`Site2 Chromosome`),
+      TRUE ~ NA_character_
+    ),
+    MET_Position = case_when(
+      MET_is_Gene1 ~ `Site1 Position`,
+      MET_is_Gene2 ~ `Site2 Position`,
+      TRUE ~ NA_real_
+    )
+  )
+
+
+# MET TSS on GRCh37: chr7:116,312,459; remove data if breakpoint is not sure
+
+
+fusion_data <- fusion_data %>%
+mutate(
+  Near_TSS = toupper(`Gene 2`) == "MET" &  # MET is 3'
+             `Site2 Chromosome` == 7 &
+             `Site2 Position` >= 116312250 &
+             `Site2 Position` <= 116341000
+)
+
+
+
+met_fusions_clean <- fusion_data %>%
+  dplyr::select(
+    `Sample ID`, 
+    `Gene 1`, 
+    `Gene 2`,
+    `Site1 Chromosome`, 
+    `Site1 Position`,
+    `Site2 Chromosome`, 
+    `Site2 Position`, 
+    Near_TSS,
+    `SV Description`, 
+    `Event Info`, 
+    `Variant Class`
+  ) %>%
+  filter(`Site2 Position` != -1 & !is.na(`Site2 Position`)) %>%
+  mutate(
+    `Variant Class` = ifelse(
+      Near_TSS,
+      "MET fusions near TSS",
+      `Variant Class`
+    )
+  )
+
+fusion_data_filtered <- met_fusions_clean %>%
+  filter(!is.na(`Variant Class`)) %>%
+  filter(`Variant Class` %in% c("FUSION", "MET fusions near TSS")) %>%
+  mutate(
+    Fusion_Mechanism = case_when(
+      `Variant Class` == "MET fusions near TSS" ~ "Fusions near TSS",
+      `Variant Class` == "FUSION" ~ "Canonical Fusions"
+    )
+  )
+
+
+# Summarize
+fusion_summary <- fusion_data_filtered %>%
+  count(Fusion_Mechanism) %>%
+  mutate(
+    Fusion_Mechanism = factor(Fusion_Mechanism, levels = c("Canonical Fusions", "Fusions near TSS")),
+    Percentage = round(n / sum(n) * 100, 1),
+    Label = paste0(Fusion_Mechanism, "\n(n = ", n, ", ", Percentage, "%)")
+  )
+
+# Color mapping
+fusion_colors <- c(
+  "Fusions near TSS" = "#d62728",
+  "Canonical Fusions" = "#045a8d"
+)
+
+# Custom Nature-style theme
+theme_nature <- theme_bw(base_family = "Arial", base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_blank(), # For pie Chart only, otherwise axis.text = element_text(size = 16), axis.title = element_text(size = 16, face = "bold"),
+    axis.title = element_blank(),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    legend.position = "none",
+    legend.key = element_blank(),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    axis.line = element_blank(),
+    axis.ticks = element_blank(),
+    panel.border = element_blank()
+  )
+
+# Plot
+figure_1b <- ggplot(fusion_summary, aes(x = "", y = n, fill = `Fusion_Mechanism`)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar("y") +
+  geom_text(aes(label = Label),
+            position = position_stack(vjust = 0.5),
+            size = 5,
+            color = "white",
+            fontface = "bold") +
+  scale_fill_manual(values = fusion_colors) +
+  labs(
+    title = expression(bold("Breakdown of " * bolditalic("MET") * " Fusions"))
+  ) +
+  theme_nature
+
+
+
+```
+
+
+```{r List of partners}
+partners <- fusion_data_filtered %>%
+  filter(Near_TSS==T)
+
+levels(as.factor(partners$`Gene 1`))
+
+# [1] "CAPZA2"  "CHCHD3"  "CTTNBP2" "FOXP2"   "MET"     "PTN"     "PTPRZ1"  "SIK3"    "SRGAP3"  "ST7"   
+```
+
+
+```{r}
+
+met_exons <- tribble(
+  ~exon, ~start, ~end, ~is_utr,
+  "1",     116312250, 116312631, TRUE,
+  "2a",    116339125, 116339139, TRUE,     # 5′ UTR part of exon 2
+  "2b",    116339140, 116340338, FALSE,    # CDS starts here
+  "3",     116371722, 116371913, FALSE,
+  "4",     116380004, 116380138, FALSE,
+  "5",     116380906, 116381079, FALSE,
+  "6",     116395409, 116395569, FALSE,
+  "7",     116397491, 116397593, FALSE,
+  "8",     116397692, 116397828, FALSE,
+  "9",     116398513, 116398674, FALSE,
+  "10",    116399445, 116399544, FALSE,
+  "11",    116403104, 116403322, FALSE,
+  "12",    116409699, 116409845, FALSE,
+  "13",    116411552, 116411708, FALSE,
+  "14",    116411903, 116412043, FALSE,
+  "15",    116414935, 116415165, FALSE,
+  "16",    116417443, 116417523, FALSE,
+  "17",    116418830, 116419011, FALSE,
+  "18",    116422042, 116422151, FALSE,
+  "19",    116423358, 116423523, FALSE,
+  "20",    116435709, 116435845, FALSE,
+  "21",    116435944, 116438431, FALSE
+)
+```
+
+
+```{r}
+fusion_data_filtered <- fusion_data_filtered %>%
+  mutate(
+    MET_Position = case_when(
+      toupper(`Gene 2`) == "MET" ~ `Site2 Position`,
+      toupper(`Gene 1`) == "MET" ~ `Site1 Position`,
+      TRUE ~ NA_real_
+    )
+  )
+
+
+breakpoint_counts <- fusion_data_filtered %>%
+  count(MET_Position) %>%
+  dplyr::rename(Position = MET_Position, Count = n)
+
+# Custom Nature-style theme
+theme_nature <- theme_bw(base_family = "Arial", base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_text(size = 16), 
+    axis.title = element_text(size = 16, face = "bold"),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    legend.position = "none",
+    legend.key = element_blank(),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    panel.border = element_blank()
+  )
+```
+
+```{r}
+
+
+# Histogram of MET fusion breakpoints
+p <- ggplot() +
+  # Histogram bars
+  geom_col(data = breakpoint_counts, aes(x = Position, y = Count),
+           fill = "#045a8d", width = 1000) +
+
+  # Exon structure below
+  geom_rect(data = met_exons,
+            aes(xmin = start, xmax = end, ymin = -2, ymax = -0.5, fill = is_utr),
+            color = "black") +
+
+  # TSS label and dashed line
+  geom_segment(aes(x = 116339140, xend = 116339140, y = -0.5, yend = max(breakpoint_counts$Count) + 2),
+               linetype = "dashed", color = "#d62728", size = 0.8) +
+  annotate("text", x = 116339140, y = max(breakpoint_counts$Count) + 3,
+           label = "MET TSS", color = "#d62728", fontface = "italic", hjust = -0.1) +
+
+  # Labels and scales
+  scale_fill_manual(values = c("TRUE" = "#d62728", "FALSE" = "#a6cee3")) +
+  labs(
+    title = expression(bold("Distribution of " * italic("MET") * " Fusion Breakpoints")),
+    x = "Genomic Coordinate on chr7 (GRCh37)",
+    y = "Fusion Count"
+  ) +
+  theme_nature
+
+# Print the plot
+print(p)
+```
+
+
+
+```{r}
+binned_data <- fusion_data_filtered %>%
+  filter(!is.na(MET_Position), MET_Position != -1) %>%
+  mutate(bin = cut(MET_Position, breaks = seq(116300200, 116440000, by = 100))) %>%
+  count(bin) %>%
+  mutate(
+    bin_center = as.numeric(sub("\\((.*),.*", "\\1", bin)) + 50  # extract lower bound and add 50 for center
+  )
+
+```
+
+```{r}
+# Custom Nature-style theme
+coord_labels <- c(116320000, 116340000, 116360000, 116380000, 116400000, 116420000)
+
+ 
+
+
+theme_nature <- theme_bw(base_family = "Arial", base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.y = element_text(size = 20), 
+    axis.title.y = element_text(size = 20, face = "bold"),
+    axis.text.x =  element_blank(), 
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    legend.position = "none",
+    legend.key = element_blank(),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    axis.line.y = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.line.x  = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.border = element_blank()
+  )
+
+figure_1c <- ggplot(binned_data, aes(x = bin_center, y = n)) +
+  geom_col(width = 400, fill = "#FF7F0E") +
+ geom_rect(
+  data = met_exons,
+  aes(xmin = start, xmax = end, ymin = -4.5, ymax = -3.5, fill = is_utr),
+  color = "black",  # outline for visibility
+  inherit.aes = FALSE
+) +
+  annotate("segment",
+         x = 116339140, xend = 116339140,
+         y = -1.5, yend = -0.5,
+         arrow = arrow(length = unit(0.15, "cm")),
+         color = "#d62728") +
+annotate("text",
+         x = 116339140,
+         y = -2.2,
+         label = "MET TSS",
+         color = "#d62728",
+         fontface = "italic",
+         hjust = 0.5,
+         size = 4) + 
+ylim(-6, NA) +  # Make space below x-axis
+  theme_nature +
+   # Labels and scales
+  labs(
+    title = expression(bold("Distribution of " * italic("MET") * " Fusion Breakpoints")),
+    x = "Genomic Coordinate on chr7 (GRCh37)",
+    y = "Fusion Count"
+  ) +
+   geom_text(
+    data = binned_data %>% filter(n >= 40),
+    aes(label = n),
+    vjust = -0.3,
+    size = 4,
+    fontface = "bold"
+  ) +
+  scale_fill_manual(
+  values = c("TRUE" = "#d62728", "FALSE" = "#a6cee3"),
+  labels = c("TRUE" = "5′ UTR exon", "FALSE" = "Coding exon"),
+  name = "Exon type"
+) +
+  annotate("segment",
+         x = 116312250, xend = 116438431,  # full gene span
+         y = -1.8, yend = -1.8,
+         arrow = arrow(length = unit(0.2, "cm"), type = "closed"),
+         color = "black",
+         size = 0.4) +
+    annotate("text", 
+           x = coord_labels, 
+           y = -4.7,  # Slightly below the exons
+           label = paste0(format(coord_labels, big.mark = ",")), 
+           angle = 45, 
+           size = 4,
+           hjust = 1, 
+           vjust = 1,
+           color = "black")
+
+
+ggsave("/Users/dogusaltintas/Library/Mobile Documents/com~apple~CloudDocs/Lab files/Comoglio/Manuscripts/MET Fusion partners/Manuscript Fusion/Figures/Figure_1C_Fusion_Breakpoints.png", plot = figure_1c, width = 10, height = 10, dpi = 600)
+
+```
+
+
+```{r}
+# Your fusion donor data
+fusion_tss <- fusion_data_filtered %>%
+  filter(Near_TSS == T)
+
+donor_tss <- data.frame(
+  Gene = fusion_tss$`Gene 1`,
+  Breakpoint = fusion_tss$`Site1 Position`
+)
+
+
+# Connect to Ensembl GRCh37
+ensembl37 <- useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl", GRCh = 37)
+ensembl38 <- useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Get canonical transcript + ATG + strand
+
+canonical_tx <- getBM(
+  attributes = c("ensembl_transcript_id", "hgnc_symbol", "transcript_is_canonical"),
+  filters = "hgnc_symbol",
+  values = unique(donor_tss$Gene),
+  mart = ensembl38
+) %>%
+  dplyr::filter(transcript_is_canonical == 1) 
+
+
+# Get translation start from GRCh37
+tx_coords <- getBM(
+  attributes = c("ensembl_transcript_id", "genomic_coding_start", 
+                 "strand", "chromosome_name", "external_gene_name"),
+  filters = "ensembl_transcript_id",
+  values = canonical_tx$ensembl_transcript_id,
+  mart = ensembl37
+)
+
+
+atg_by_transcript <- tx_coords %>%
+  group_by(external_gene_name, ensembl_transcript_id, strand) %>%
+  summarise(
+    ATG = if_else(unique(strand) == 1,
+                  min(genomic_coding_start, na.rm = TRUE),
+                  max(genomic_coding_start, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+buffer <- 500  # You can tune this value (e.g., 50–200 bp)
+
+fusion_annotated <- donor_tss %>%
+  left_join(atg_by_transcript, by = c("Gene" = "external_gene_name")) %>%
+  mutate(
+  fusion_type = case_when(
+    strand == 1 & Breakpoint < (ATG - buffer) ~ "Upstream (5′UTR)",
+    strand == 1 & Breakpoint >= (ATG - buffer) & Breakpoint <= (ATG + buffer) ~ "Near ATG",
+    strand == 1 & Breakpoint > (ATG + buffer) ~ "In CDS",
+    strand == -1 & Breakpoint > (ATG + buffer) ~ "Upstream (5′UTR)",
+    strand == -1 & Breakpoint <= (ATG + buffer) & Breakpoint >= (ATG - buffer) ~ "Near ATG",
+    strand == -1 & Breakpoint < (ATG - buffer) ~ "In CDS",
+    TRUE ~ "Unclassified"
+  )
+)
+
+```
+
+
+
+```{r}
+   fusion_annotated %>%
+  mutate(Relative_Pos = ifelse(strand == 1, Breakpoint - ATG, ATG - Breakpoint)) %>%
+  ggplot(aes(x = reorder(Gene, Relative_Pos), y = Relative_Pos)) +
+  geom_segment(aes(xend = Gene, y = 0, yend = Relative_Pos), size = 1.2) +
+  geom_point(size = 4) +
+  scale_color_manual(values = c("TRUE" = "#d62728", "FALSE" = "#045a8d")) +
+  coord_flip() +
+  theme_bw() +
+  labs(
+  title = expression(bold("Position of Donor Breakpoints Relative to ATG")),
+  x = "Donor Genes",
+  y = "Distance from ATG (bp)"
+)
+```
+
+
+
+```{r}
+theme_nature <- theme_bw(base_family = "Arial", base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_text(size = 20), 
+    axis.title = element_text(size = 20, face = "bold"),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    legend.position = "none",
+    legend.key = element_blank(),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    panel.border = element_blank()
+  )
+
+fusion_annotated$utr_contributed <- ifelse(fusion_annotated$fusion_type == "In CDS", F, T)
+
+fusion_annotated %>%
+  filter(Gene != "MET") %>%
+  mutate(Relative_Pos = ifelse(strand == 1, Breakpoint - ATG, ATG - Breakpoint)) %>%
+  ggplot(aes(x = reorder(Gene, Relative_Pos), y = Relative_Pos, color = utr_contributed)) +
+  
+  # Shaded UTR region (showing where donor breakpoints still contribute UTR)
+  geom_rect(aes(xmin = -Inf, xmax = Inf, ymin = -500, ymax = 500),
+            fill = "#fdd000", alpha = 0.4, inherit.aes = FALSE) +
+  
+  # Connecting segments and points
+  geom_segment(aes(xend = Gene, y = 0, yend = Relative_Pos), size = 1.2, color = "black") +
+  geom_point(size = 4) +
+
+  # Manual color mapping
+  scale_color_manual(
+    values = c("TRUE" = "#d62728", "FALSE" = "#045a8d"),
+    labels = c("TRUE" = "Upstream of ATG", "FALSE" = "Downstream")
+  ) +
+
+  coord_flip() +
+  theme_nature +
+  labs(
+    title = expression(bold("Donor Breakpoints Relative to Start Codon (ATG)")),
+    x = "Donor Gene",
+    y = "Distance from ATG (bp)"
+  ) 
+```
+```{r}
+
+fusion_annotated <- fusion_annotated %>%
+  filter(Gene != "MET") %>%
+  mutate(Relative_Pos = ifelse(strand == 1, Breakpoint - ATG, ATG - Breakpoint)) 
+
+
+ggplot(fusion_annotated, aes(x = Relative_Pos)) +
+  geom_density(fill = "#045a8d", alpha = 0.6, adjust = 1.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "#d62728", size = 1) +
+  annotate("text", x = 0, y = Inf, label = "ATG", vjust = 2, color = "#d62728", fontface = "italic", size = 4) +
+  labs(
+    title = expression(bold("Distribution of Donor Breakpoints Relative to ATG")),
+    x = "Distance from ATG (bp)",
+    y = "Density"
+  ) +
+  theme_bw(base_family = "Arial", base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_text(size = 16),
+    axis.title = element_text(size = 16, face = "bold"),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5)
+  )
+
+
+figure_1d <- ggplot(fusion_annotated, aes(x = Relative_Pos)) +
+  # Histogram for raw counts
+  geom_histogram(aes(y = ..count..), binwidth = 25000, fill = "white", color = "white", alpha = 0) +
+  # Density line for smoothed trend
+  geom_density(aes(y = ..scaled.. * 50000*max(..count..)), fill = "#045a8d", alpha = .5) +
+  
+  # Vertical line for ATG
+  geom_vline(xintercept = 0, linetype = "dashed", color = "#d62728", size = 1.5) +
+  annotate("text", x = 0, y = Inf, label = "ATG", vjust = 2, color = "#d62728", fontface = "italic", size = 4) +
+  
+  # Labels and theme
+  labs(
+    title = expression(bold("Distribution of Donor Breakpoints Relative to ATG")),
+    x = "Distance from ATG (bp)",
+    y = "Number of Fusions"
+  ) + 
+  scale_y_continuous(breaks = seq(0, 16, by = 2), limits = c(0, 14)) +
+  theme_nature
+
+
+ggsave("/Users/dogusaltintas/Library/Mobile Documents/com~apple~CloudDocs/Lab files/Comoglio/Manuscripts/MET Fusion partners/Manuscript Fusion/Figures/Figure_1d_donorsATG.png", plot = figure_1d, width = 10, height = 10, dpi = 600)
+```
+
+
+
+
+```{r}
+fusion_annotated <- fusion_annotated %>%
+  filter(Gene != "MET") %>%
+  mutate(Relative_Pos = ifelse(strand == 1, Breakpoint - ATG, ATG - Breakpoint)) 
+
+
+ggplot(fusion_annotated, aes(x = Relative_Pos)) +
+  geom_density(fill = "#045a8d", alpha = 0.6, adjust = 1.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "#d62728", size = 1) +
+  annotate("text", x = 0, y = Inf, label = "ATG", vjust = 2, color = "#d62728", fontface = "italic", size = 4) +
+  labs(
+    title = expression(bold("Distribution of Donor Breakpoints Relative to ATG")),
+    x = "Distance from ATG (bp)",
+    y = "Density"
+  ) +
+  theme_bw(base_family = "Arial", base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_text(size = 16),
+    axis.title = element_text(size = 16, face = "bold"),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5)
+  )
+
+
+figure_1d <- ggplot(fusion_annotated, aes(x = Relative_Pos)) +
+  # Histogram for raw counts
+  geom_histogram(aes(y = ..count..), binwidth = 25000, fill = "#045a8d", color = "black", alpha = 0.3) +
+  # Density line for smoothed trend
+  geom_density(aes(y = ..scaled.. * 50000*max(..count..)), fill = "#d62728", alpha = .5) +
+  
+  # Vertical line for ATG
+  geom_vline(xintercept = 0, linetype = "dashed", color = "#d62728", size = 1) +
+  annotate("text", x = 0, y = Inf, label = "ATG", vjust = 2, color = "#d62728", fontface = "italic", size = 4) +
+  
+  # Labels and theme
+  labs(
+    title = expression(bold("Distribution of Donor Breakpoints Relative to ATG")),
+    x = "Distance from ATG (bp)",
+    y = "Number of Fusions"
+  ) + 
+  scale_y_continuous(breaks = seq(0, 16, by = 2), limits = c(0, 14)) +
+  theme_nature
+
+ggsave("/Users/daltinta/Library/Mobile Documents/com~apple~CloudDocs/Lab files/Comoglio/Manuscripts/MET Fusion partners/GENIE DATA/Figure_1d_donor_distribution.png", plot = figure_1d, width = 8, height = 8, dpi = 600)
+
+
+# Figure 2
+
+```{r}
+my_data <- readRDS("oncogenes_with_mfe.rds")
+```
+
+
+# Figure 2b
+```{r}
+
+# Input data
+utr_data <- data.frame(
+  UTR = rep(c("No_UTR", "MET", "CAPZA2", "PTPRZ1", "SIK3", "ST7", "SRGAP3"), each = 6),
+  Value = c(
+    12.47603092, 14.07030556, 12.6682323, 12.411859, 12.85438886, 13.02417216,
+    0.894457612, 1.141062835, 1.013483572, 0.999372452, 0.935618715, 1.016004814,
+    12.29361852, 14.25634652, 13.26584975, 14.43582993, 13.84632989, 13.17643881,
+    3.163377222, 3.950572354, 3.156046272, 3.227040601, 3.153164563, 3.080481811,
+    21.10627106, 23.34399749, 21.40082268, 22.12100634, 24.06722893, 25.44992771,
+    8.738056077, 9.399071932, 9.600135272, 10.83102613, 9.845660659, 8.391729106,
+    3.407388816, 3.919391668, 3.611045206, 3.675163195, 3.760644368, 3.646238943
+  )
+)
+
+utr_order <- utr_data %>%
+  dplyr::group_by(UTR) %>%
+  dplyr::summarise(mean_value = mean(Value)) %>%
+  dplyr::arrange(mean_value) %>%
+  dplyr::pull(UTR)
+
+
+utr_data$UTR <- factor(utr_data$UTR, levels = c("No_UTR", "MET", setdiff(utr_order, c("No_UTR", "MET"))))
+
+# Custom colors
+colors <- c("No_UTR" = "gray40", "MET" = "#b2182b",
+            "PTPRZ1" = "#deebf7", "SRGAP3" = "#9ecae1", "ST7" = "#4292c6",
+            "CAPZA2" = "#2171b5", "SIK3" = "#08306b")
+
+# Plot
+theme_nature <- theme_bw(base_family = "Arial", base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_text(size = 16), 
+    axis.title = element_text(size = 16, face = "bold"),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    legend.position = "none",
+    legend.key = element_blank(),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    panel.border = element_blank()
+  )
+
+p <- ggplot(utr_data, aes(x = UTR, y = Value, fill = UTR)) +
+  geom_bar(stat = "summary", fun = "mean", width = 0.8, color="black") +
+   geom_jitter(width = 0.15, size = 2, alpha = 0.8) +
+  scale_fill_manual(values = colors) +
+  labs(
+    x = "5′ UTR",
+    y = "NanoLuc / Firefly Ratio",
+    title = ""
+  ) +
+  theme_nature +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, face = "italic"))
+
+
+# Run Tukey HSD test
+anova_result <- aov(Value ~ UTR, data = utr_data)
+tukey_res <- TukeyHSD(anova_result)
+
+tukey_df <- as.data.frame(tukey_res$UTR)
+tukey_df$comparison <- rownames(tukey_df)
+
+# Split comparison into groups
+tukey_df <- separate(tukey_df, comparison, into = c("group1", "group2"), sep = "-")
+
+# Filter only comparisons involving MET
+tukey_df <- tukey_df %>%
+  filter(group1 == "MET" | group2 == "MET") %>%
+  mutate(
+    y.position = max(utr_data$Value) + seq(1, n(), by = 1),  # space above bars
+    p.label = ifelse(`p adj` == 0, "p < 1e-16", paste0("p = ", signif(`p adj`, digits = 2)))
+  )
+
+
+# Add lines and labels for statistical comparisons
+Nanoluc_plot <- p + 
+  geom_segment(aes(x = 1, xend = 2, y = 15, yend = 15), size = 0.4) +
+  annotate("text", x = 1.5, y = 16, label = "p < 1e-16", size = 4.5, fontface = "italic") +
+
+  geom_segment(aes(x = 2, xend = 3, y = 17.5, yend = 17.5), size = 0.4) +
+  annotate("text", x = 2.5, y = 18.5, label = "p = 5e-4", size = 4.5, fontface = "italic") +
+
+  geom_segment(aes(x = 2, xend = 4, y = 20, yend = 20), size = 0.4) +
+  annotate("text", x = 3, y = 21, label = "p = 4.5e-5", size = 4.5, fontface = "italic") +
+
+  geom_segment(aes(x = 2, xend = 5, y = 22.5, yend = 22.5), size = 0.4) +
+  annotate("text", x = 3.5, y = 23.5, label = "p < 1e-16", size = 4.5, fontface = "italic") +
+
+  geom_segment(aes(x = 2, xend = 6, y = 25, yend = 25), size = 0.4) +
+  annotate("text", x = 4, y = 26, label = "p < 1e-16", size = 4.5, fontface = "italic") +
+
+  geom_segment(aes(x = 2, xend = 7, y = 27.5, yend = 27.5), size = 0.4) +
+  annotate("text", x = 4.5, y = 28.5, label = "p < 1e-16", size = 4.5, fontface = "italic")
+
+ggsave("NanoLuc_MET_Figure2b.tiff", Nanoluc_plot, width = 8, height = 8, dpi = 600)
+```
+
+
+# Figure 6d Nanoluc other oncogenes
+
+```{r}
+
+# Raw input vector
+utr_data <- data.frame(
+  UTR = rep(c(
+    "ETV1", "MTFR1", "NUCKS1", "ETV4", "HELZ", "KAT7", "FGFR1", "NSD3",
+    "TEC", "FGFR2", "PPP6R3", "SLC45A3", "JAK2", "AK3", "TTC39B", "NTRK2", "KCND3", "SLC28A3"
+  ), each = 6),
+  Value = c(
+    0.664089244, 0.65797431, 0.606568284, 0.665837589, 0.837849623, 0.652649821,
+    22.0253501, 26.28269498, 25.44649453, 26.79777461, 25.57624516, 24.81531136,
+    4.915836918, 3.113298085, 6.177409591, 3.531410143, 5.01103643, 3.466551551,
+    1.532063067, 1.449117321, 1.458642151, 1.514996414, 1.485461542, 1.499686545,
+    4.646159711, 4.431430947, 4.588324524, 3.970378128, 5.260229713, 4.724561482,
+    6.290440533, 11.04645974, 15.26754401, 8.487003494, 9.759286837, 7.184664055,
+    2.321137465, 2.777469219, 3.174888761, 2.926679438, 3.021287273, 2.918840019,
+    4.042901439, 4.210110728, 4.731742222, 4.819950237, 4.742473206, 4.83139057,
+    12.62832513, 15.36624082, 14.97785025, 17.6336945, 17.41479872, 17.50836499,
+    1.130819038, 1.385402984, 1.586536138, 1.488613402, 1.567077155, 1.590846569,
+    4.964686659, 5.795435773, 6.780391345, 6.472761383, 6.158675001, 7.293672994,
+    3.720447627, 2.289917933, 2.216465222, 2.229546139, 2.185545029, 2.508252635,
+    3.63135581, 3.592869916, 3.328612911, 2.605959905, 3.811040823, 3.561772169,
+    27.21896275, 27.3229761, 24.05309135, 22.88637274, 29.23661906, 24.63005422,
+    16.69828007, 18.46356967, 16.74608568, 15.4958721, 20.13097343, 16.73510585,
+    4.123110416, 4.004474536, 3.799599202, 3.124940832, 4.285757736, 3.790964516,
+    14.84838945, 15.74905637, 13.79916229, 11.61140597, 16.27185742, 13.29009252,
+    26.32293495, 24.78135782, 22.91852721, 19.23379534, 34.44460113, 30.6416387
+  )
+)
+
+
+
+# Add info
+utr_data$gene_label <- rep(c("oncogene", "partnerA", "partnerB"), each = 6)
+
+
+# Create triplet index: each triplet is 18 rows (6 replicates × 3 genes)
+utr_data$triplet <- rep(1:(nrow(utr_data) / 18), each = 18)
+
+# Reorder partner labels based on mean expression within each triplet
+utr_data <- utr_data %>%
+  group_by(triplet, gene_label) %>%
+  mutate(mean_val = mean(Value)) %>%
+  ungroup() %>%
+  group_by(triplet) %>%
+  mutate(
+    type = case_when(
+      gene_label == "oncogene" ~ "oncogene",
+      gene_label == "partnerA" & mean_val <= mean(Value[gene_label == "partnerB"]) ~ "partner_low",
+      gene_label == "partnerB" & mean_val <= mean(Value[gene_label == "partnerA"]) ~ "partner_low",
+      TRUE ~ "partner_high"
+    )
+  ) %>%
+  ungroup() %>%
+  dplyr::select(-mean_val)
+
+
+# Create a composite label to control the order: oncogene_first, then partners ordered by mean
+utr_data <- utr_data %>%
+  group_by(triplet) %>%
+  mutate(
+    gene_mean = mean(Value),
+    label = case_when(
+      type == "oncogene" ~ paste0(sprintf("%02d", triplet), "_1_", UTR),
+      type == "partner_low" ~ paste0(sprintf("%02d", triplet), "_2_", UTR),
+      type == "partner_high" ~ paste0(sprintf("%02d", triplet), "_3_", UTR)
+    )
+  ) %>%
+  ungroup()
+
+# Reorder UTR levels using the label
+utr_data$label <- factor(utr_data$label, levels = unique(utr_data$label[order(utr_data$label)]))
+
+# Set fill color per type
+color_map <- c("oncogene" = "#b2182b", "partner_low" = "#4292c6", "partner_high" = "#08306b")
+
+
+theme_nature <- theme_bw(base_family = "Arial", base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_text(size = 14),
+    axis.title = element_text(size = 16, face = "bold"),
+    legend.position = "none",
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1, face = "italic")
+  )
+
+
+# Initialize list to collect stats
+stats_results <- list()
+
+# Run ANOVA and Tukey HSD per triplet
+for (t in unique(utr_data$triplet)) {
+  subset_data <- utr_data %>% filter(triplet == t)
+  aov_model <- aov(Value ~ type, data = subset_data)
+  tukey <- TukeyHSD(aov_model)
+  tukey_df <- as.data.frame(tukey$type)
+  tukey_df$comparison <- rownames(tukey_df)
+  tukey_df$triplet <- t
+  stats_results[[t]] <- tukey_df
+}
+
+# Combine all results
+all_stats <- bind_rows(stats_results)
+
+# Format for display
+all_stats_clean <- all_stats %>%
+  dplyr::select(triplet, comparison, `p adj`) %>%
+  arrange(triplet, `p adj`)
+
+# Print or export results
+print(all_stats_clean)
+
+
+utr_data$type <- factor(utr_data$type, levels = c("oncogene", "partner_low", "partner_high"))
+
+triplet_labels <- utr_data %>%
+  filter(type == "oncogene") %>%
+  distinct(triplet, UTR) %>%
+  deframe()
+
+
+
+
+
+fig6d <- ggplot(utr_data, aes(x = label, y = Value, fill = type)) +
+  geom_bar(stat = "summary", fun = "mean", width = 0.8, color = "black") +
+  geom_jitter(width = 0.15, size = 2, alpha = 0.8) +
+  scale_fill_manual(values = color_map) +
+  scale_x_discrete(labels = gsub("^[0-9]+_[1-3]_", "", levels(utr_data$label))) +
+  labs(
+    x = "5′ UTR",
+    y = "NanoLuc / Firefly Ratio"
+  ) +
+  theme_nature
+
+utr_data <- utr_data %>%
+  mutate(
+    gene_label = case_when(
+      type == "oncogene" ~ as.character(UTR),
+      type == "partner_low" ~ as.character(UTR),
+      type == "partner_high" ~ as.character(UTR)
+    )
+  )
+
+
+fig6d_facet <- ggplot(utr_data, aes(x = type, y = Value, fill = type)) +
+  geom_bar(stat = "summary", fun = "mean", width = 0.7, color = "black") +
+  geom_jitter(width = 0.2, size = 1.8, alpha = 0.9) +
+  scale_fill_manual(values = color_map) +
+  facet_wrap(~ triplet, scales = "free_y", labeller = labeller(triplet = triplet_labels), nrow=1) +
+  labs(
+    x = NULL,
+    y = "NanoLuc / Firefly Ratio"
+  ) +
+  theme_nature +
+  theme(
+    strip.text = element_text(size = 14, face = "bold.italic"),
+    axis.text.x = element_text(size = 12, face = "bold"),
+    axis.ticks.x = element_blank()
+  ) 
+
+
+ggsave("NanoLuc_oncogenes_Figure6d.tiff", fig6d_facet, width = 11, height = 4.5, dpi = 600)
+
+# p-values as supp data
+
+
+
+
+```
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

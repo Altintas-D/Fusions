@@ -1,0 +1,1783 @@
+---
+title: "Pipeline for Fusions"
+author: "Dogus Altintas"
+date: "2025-04-18"
+output: html_document
+---
+
+### GENIE v17.0 229453 samples
+
+
+```{r}
+library(biomaRt)
+library(readr)
+library(dplyr)
+
+
+setwd("/Users/daltinta/Library/Mobile Documents/com~apple~CloudDocs/Lab files/Comoglio/Manuscripts/MET Fusion partners/GENIE DATA/Other_Oncogenes_Fusions")
+
+```
+
+## R Function
+
+
+
+```{r}
+
+analyze_fusions <- function(tsv_path, oncogene) {
+
+
+  # Load the fusion file
+  fusion_data <- read_tsv(tsv_path, show_col_types = FALSE)
+
+  # Connect to Ensembl GRCh37
+  ensembl <- useEnsembl(biomart = "ensembl",
+                        dataset = "hsapiens_gene_ensembl",
+                        GRCh = 37)
+
+  # Get basic transcript info from one valid BioMart page
+  tx_info <- getBM(
+    attributes = c("hgnc_symbol", "ensembl_transcript_id",
+                   "transcript_start", "transcript_end",
+                   "strand", "chromosome_name"),
+    filters = "hgnc_symbol",
+    values = oncogene,
+    mart = ensembl
+  )
+
+  if (nrow(tx_info) == 0) {
+    warning(paste("No transcript info found for", oncogene))
+    return(NULL)
+  }
+
+  # Use the most upstream transcript as canonical proxy
+  tx_info <- tx_info %>%
+    arrange(transcript_start) %>%
+    dplyr::slice(1)
+
+  # Clean fusion data based on your actual column names
+  fusion_data <- fusion_data %>%
+    dplyr::filter(`Gene 2` == oncogene, `Site2 Position` != -1) %>%
+    mutate(Site2_Position = as.numeric(`Site2 Position`))
+
+  # Define putative translation start
+  coding_start <- ifelse(tx_info$strand == 1,
+                         tx_info$transcript_start,
+                         tx_info$transcript_end)
+
+  # Determine if UTR is replaced
+  fusion_data <- fusion_data %>%
+    dplyr::filter(`Site2 Chromosome` == tx_info$chromosome_name) %>%
+    mutate(utr_replaced = case_when(
+      tx_info$strand == 1 & Site2_Position < coding_start ~ TRUE,
+      tx_info$strand == -1 & Site2_Position > coding_start ~ TRUE,
+      TRUE ~ FALSE
+    ))
+
+  return(fusion_data)
+}
+
+
+
+```
+
+
+```{r}
+result_EGFR <- analyze_fusions("table_EGFR.tsv", "EGFR")
+table(result_EGFR$utr_replaced)
+
+result_MET <- analyze_fusions("table_MET.tsv", "MET")
+table(result_MET$utr_replaced)
+```
+
+
+```{r}
+# Connect to GRCh38 (default Ensembl)
+ensembl38 <- useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl")
+
+canonical_tx <- getBM(
+  attributes = c("ensembl_transcript_id", "hgnc_symbol", "transcript_is_canonical"),
+  filters = "hgnc_symbol",
+  values = "MET",
+  mart = ensembl38
+) %>%
+  dplyr::filter(transcript_is_canonical == 1) %>%
+  dplyr::slice(1)
+
+
+
+library(biomaRt)
+
+# Connect to GRCh37
+ensembl37 <- useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl", GRCh = 37)
+
+# Get translation start from GRCh37
+tx_coords <- getBM(
+  attributes = c("ensembl_transcript_id", "genomic_coding_start", 
+                 "strand", "chromosome_name"),
+  filters = "ensembl_transcript_id",
+  values = "ENST00000397752",
+  mart = ensembl37
+)
+
+
+# Assume tx_coords is your table
+translation_start <- if (unique(tx_coords$strand) == 1) {
+  min(tx_coords$genomic_coding_start, na.rm = TRUE)
+} else {
+  max(tx_coords$genomic_coding_start, na.rm = TRUE)
+}
+
+
+fusion_data <- read_tsv("table_MET.tsv", show_col_types = FALSE)
+
+# Clean and filter
+fusion_data <- fusion_data %>%
+  dplyr::filter(`Gene 2` == "MET", `Site2 Position` != -1) %>%
+  mutate(Site2_Position = as.numeric(`Site2 Position`)) %>%
+  mutate(utr_replaced = Site2_Position < translation_start)
+
+table(fusion_data$utr_replaced)
+
+
+```
+
+```{r}
+check_utr_replacement <- function(tsv_path, oncogene) {
+  library(biomaRt)
+  library(dplyr)
+  library(readr)
+  
+  # Step 1: Get canonical transcript from GRCh38
+  ensembl38 <- useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl")
+  canonical_tx <- getBM(
+    attributes = c("ensembl_transcript_id", "hgnc_symbol", "transcript_is_canonical"),
+    filters = "hgnc_symbol",
+    values = oncogene,
+    mart = ensembl38
+  ) %>%
+    dplyr::filter(transcript_is_canonical == 1) %>%
+    slice(1)
+  
+  if (nrow(canonical_tx) == 0) {
+    warning(paste("No canonical transcript found for", oncogene))
+    return(NULL)
+  }
+  
+  # Step 2: Get CDS start for canonical transcript from GRCh37
+  ensembl37 <- useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl", GRCh = 37)
+  tx_coords <- getBM(
+    attributes = c("ensembl_transcript_id", "genomic_coding_start", 
+                   "strand", "chromosome_name"),
+    filters = "ensembl_transcript_id",
+    values = canonical_tx$ensembl_transcript_id,
+    mart = ensembl37
+  )
+  
+  if (nrow(tx_coords) == 0 || all(is.na(tx_coords$genomic_coding_start))) {
+    warning(paste("No CDS start found for", oncogene))
+    return(NULL)
+  }
+  
+  strand <- unique(tx_coords$strand)
+  cds_start <- if (strand == 1) {
+    min(tx_coords$genomic_coding_start, na.rm = TRUE)
+  } else {
+    max(tx_coords$genomic_coding_start, na.rm = TRUE)
+  }
+  chromosome <- unique(tx_coords$chromosome_name)
+  
+  # Step 3: Load fusion data
+  fusion_data <- read_tsv(tsv_path, show_col_types = FALSE)
+  
+  # Step 4: Filter and annotate
+  fusion_data <- fusion_data %>%
+    dplyr::filter(`Gene 2` == oncogene, `Site2 Position` != -1) %>%
+    mutate(Site2_Position = as.numeric(`Site2 Position`)) %>%
+    dplyr::filter(`Site2 Chromosome` == chromosome) %>%
+    mutate(
+      utr_replaced = case_when(
+        strand == 1 & Site2_Position < cds_start ~ TRUE,
+        strand == -1 & Site2_Position > cds_start ~ TRUE,
+        TRUE ~ FALSE
+      )
+    )
+  
+  # Step 5: Return
+  return(list(
+    fusion_table = fusion_data,
+    summary = table(fusion_data$utr_replaced),
+    transcript = canonical_tx$ensembl_transcript_id,
+    cds_start = cds_start,
+    strand = strand,
+    chromosome = chromosome
+  ))
+}
+
+```
+
+```{r}
+check_utr_replacement <- function(tsv_path, oncogene) {
+  library(biomaRt)
+  library(dplyr)
+  library(readr)
+
+  # Step 1: Get canonical transcript from GRCh38
+  ensembl38 <- useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl")
+  canonical_tx <- getBM(
+    attributes = c("ensembl_transcript_id", "hgnc_symbol", "transcript_is_canonical"),
+    filters = "hgnc_symbol",
+    values = oncogene,
+    mart = ensembl38
+  ) %>%
+    dplyr::filter(transcript_is_canonical == 1) %>%
+    dplyr::slice(1)
+
+  if (nrow(canonical_tx) == 0) {
+    warning(paste("No canonical transcript found for", oncogene))
+    return(NULL)
+  }
+
+  # Step 2: Get CDS start and exon 1 info from GRCh37
+  ensembl37 <- useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl", GRCh = 37)
+
+  tx_id <- canonical_tx$ensembl_transcript_id
+
+  tx_coords <- getBM(
+    attributes = c("ensembl_transcript_id", "genomic_coding_start", "strand", "chromosome_name"),
+    filters = "ensembl_transcript_id",
+    values = tx_id,
+    mart = ensembl37
+  )
+
+  exon1_info <- getBM(
+    attributes = c("ensembl_transcript_id", "exon_chrom_start", "exon_chrom_end", "rank"),
+    filters = "ensembl_transcript_id",
+    values = tx_id,
+    mart = ensembl37
+  ) %>% 
+    dplyr::filter(rank == 1)
+
+  if (nrow(tx_coords) == 0 || all(is.na(tx_coords$genomic_coding_start)) || nrow(exon1_info) == 0) {
+    warning(paste("Missing annotation for", oncogene))
+    return(NULL)
+  }
+
+  strand <- unique(tx_coords$strand)
+  chromosome <- unique(tx_coords$chromosome_name)
+
+  cds_start <- if (strand == 1) {
+    min(tx_coords$genomic_coding_start, na.rm = TRUE)
+  } else {
+    max(tx_coords$genomic_coding_start, na.rm = TRUE)
+  }
+
+  exon1_start <- min(exon1_info$exon_chrom_start, na.rm = TRUE)
+  exon1_end   <- max(exon1_info$exon_chrom_end, na.rm = TRUE)
+
+  # Step 3: Load fusion data
+  fusion_data <- read_tsv(tsv_path, show_col_types = FALSE)
+
+  # Step 4: Filter and annotate
+  fusion_data <- fusion_data %>%
+    dplyr::filter(`Gene 2` == oncogene, `Site2 Position` != -1) %>%
+    mutate(Site2_Position = as.numeric(`Site2 Position`)) %>%
+    dplyr::filter(`Site2 Chromosome` == chromosome) %>%
+    mutate(
+      utr_replaced = case_when(
+        strand == 1 & Site2_Position < cds_start ~ TRUE,
+        strand == -1 & Site2_Position > cds_start ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      exon1_removed = case_when(
+        strand == 1 & Site2_Position > exon1_end ~ TRUE,
+        strand == -1 & Site2_Position < exon1_start ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      utr_replaced_strict = utr_replaced & exon1_removed
+    )
+
+  # Step 5: Return
+  return(list(
+    fusion_table = fusion_data,
+    summary = table(fusion_data$utr_replaced_strict),
+    transcript = tx_id,
+    cds_start = cds_start,
+    exon1_start = exon1_start,
+    exon1_end = exon1_end,
+    strand = strand,
+    chromosome = chromosome
+  ))
+}
+
+```
+
+
+```{r}
+result_ABL1 <- check_utr_replacement("table_ABL1.tsv", "ABL1")
+result_ABL1$summary
+
+result_MET <- check_utr_replacement("table_MET.tsv", "MET")
+result_MET$summary
+
+
+result_EGFR <- check_utr_replacement("table_EGFR.tsv", "EGFR")
+result_EGFR$summary
+
+
+result_ALK <- check_utr_replacement("table_ALK.tsv", "ALK")
+result_ALK$summary
+
+result_NTRK2 <- check_utr_replacement("table_NTRK2.tsv", "NTRK2")
+result_NTRK2$summary
+
+result_FGFR1 <- check_utr_replacement("table_FGFR1.tsv", "FGFR1")
+result_FGFR1$summary
+
+result_FGFR2 <- check_utr_replacement("table_FGFR2.tsv", "FGFR2")
+result_FGFR2$summary
+
+result_MYCL <- check_utr_replacement("table_MYCL.tsv", "MYCL")
+result_MYCL$summary
+
+result_JAK2 <- check_utr_replacement("table_JAK2.tsv", "JAK2")
+result_JAK2$summary
+
+```
+
+```{r}
+build_utr_fusion_summary <- function(result_list) {
+  summary_df <- do.call(rbind, lapply(names(result_list), function(gene) {
+    res <- result_list[[gene]]$summary
+    total_fusions <- sum(res)
+    utr_fusions <- if ("TRUE" %in% colnames(res)) sum(res[, "TRUE"]) else 0
+    data.frame(
+      Gene = gene,
+      TotalFusions = total_fusions,
+      UTR_Fusions = utr_fusions,
+      Percent_UTR_Fusions = round(100 * utr_fusions / total_fusions, 2)
+    )
+  }))
+  
+  summary_df <- summary_df[order(-summary_df$Percent_UTR_Fusions), ]
+  rownames(summary_df) <- NULL
+  return(summary_df)
+}
+
+```
+
+
+
+
+```{r}
+
+library(ggrepel)
+
+
+# Prepare the PCA input
+utr_pca_data <- utr_table %>%
+  dplyr::select(Gene, `5′ UTR Length (nt)`, `GC Content (%)`, `# uORFs`, `MFE (kcal/mol)`) %>%
+  dplyr::rename(
+    Length = `5′ UTR Length (nt)`,
+    GC = `GC Content (%)`,
+    uORFs = `# uORFs`,
+    MFE = `MFE (kcal/mol)`
+  )
+
+# Scale features
+utr_scaled <- scale(utr_pca_data[, -1])
+pca <- prcomp(utr_scaled)
+
+# Cluster and format data
+pca_df <- as.data.frame(pca$x)
+pca_df$Gene <- utr_pca_data$Gene
+set.seed(42)
+pca_df$Cluster <- factor(kmeans(utr_scaled, centers = 3)$cluster)
+
+pca_df <- pca_df %>%
+  dplyr::mutate(
+    Cluster = as.factor(Cluster),
+    Gene = as.character(Gene)  # ensure character for ggrepel
+  )
+
+# PCA plot
+pca_plot <- ggplot(pca_df, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(size = 4) +
+  geom_text_repel(aes(label = Gene), size = 4, fontface = "bold", max.overlaps = 30) +
+  stat_ellipse(aes(group = Cluster), linetype = "dashed", alpha = 0.3, size = 1) +
+  labs(
+    title = "PCA of 5′ UTR Features of Oncogenes",
+    x = "PC1", y = "PC2", color = "Cluster"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "right"
+  )
+
+```
+
+
+```{r}
+library(tidyr)
+library(pheatmap)
+
+# Prepare heatmap input
+library(tibble)
+
+utr_matrix <- utr_pca_data %>%
+  tibble::remove_rownames() %>%        # Make sure no row names exist
+  column_to_rownames("Gene") %>%       # Now safe to assign Gene as row names
+  scale()                              # Z-score normalization
+
+# Optional: order by PCA cluster
+utr_matrix <- utr_matrix[pca_df$Gene[order(pca_df$Cluster)], ]
+
+utr_matrix[, "MFE"] <- -utr_matrix[, "MFE"]
+
+colnames(utr_matrix)[colnames(utr_matrix) == "MFE"] <- "-MFE (stability)"
+
+
+annotation_df <- pca_df %>%
+  dplyr::select(Gene, Cluster) %>%
+  dplyr::filter(Gene %in% rownames(utr_matrix)) %>%
+  tibble::remove_rownames() %>%
+  tibble::column_to_rownames("Gene")
+
+# Reorder to match matrix
+annotation_df <- annotation_df[rownames(utr_matrix), , drop = FALSE]
+
+heatmap <- pheatmap(
+  utr_matrix,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_row = annotation_df,
+  main = "Heatmap of 5′ UTR Features (z-scored)",
+  fontsize_row = 12,
+  fontsize_col = 14,
+  color = colorRampPalette(c("steelblue", "white", "firebrick"))(100),
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  border_color = "grey90", 
+  cutree_rows = 3
+)
+
+ggsave("heatmap_oncogenes.png", plot = heatmap, dpi = 600, width = 6, height = 12)
+ggsave("pca_oncogenes.png", plot = pca_plot, dpi = 600, width = 8, height = 8)
+
+```
+
+```{r}
+
+```
+
+
+
+```{r}
+# Oncogenes to evaluate
+onco <- c("MET", "EGFR", "ALK", "NTRK2", "FGFR1", "FGFR2", "MYCL", "JAK2", "PDGFRB", "FGFR3", "MYC", "MYCN", "JAK1","NTRK3", "ETV4", "ABL1", "ETV1", "KRAS", "ETV5", "HRAS", "RET", "BRAF", "ERBB2", "ROS1", "NRAS", "NTRK1", "PDGFRA", "ERG")
+
+# Loop through each oncogene + its TSV file
+utr_replacement_summaries <- lapply(onco, function(gene) {
+  tsv_file <- paste0("table_", gene, ".tsv")
+  result <- check_utr_replacement(tsv_file, gene)
+  
+  # Handle empty results gracefully
+  if (!is.null(result)) {
+    summary_df <- as.data.frame(result$summary)
+    colnames(summary_df) <- c("utr_replaced", "Count")
+    summary_df$Gene <- gene
+    return(summary_df)
+  } else {
+    return(data.frame(utr_replaced = NA, Count = 0, Gene = gene))
+  }
+})
+
+# Combine all results
+utr_summary_df <- do.call(rbind, utr_replacement_summaries)
+
+# Spread into wide format for easier inspection
+library(tidyr)
+utr_summary_wide <- tidyr::pivot_wider(
+  utr_summary_df,
+  names_from = utr_replaced,
+  values_from = Count,
+  values_fill = 0,
+  names_prefix = "utr_"
+)
+
+# Arrange for readability
+utr_summary_wide <- dplyr::select(utr_summary_wide, Gene, utr_FALSE, utr_TRUE)
+print(utr_summary_wide)
+
+```
+
+
+```{r}
+# Calculate percentages
+utr_percent <- utr_summary_wide %>%
+  dplyr::mutate(
+    utr_FALSE = tidyr::replace_na(utr_FALSE, 0),
+    utr_TRUE = tidyr::replace_na(utr_TRUE, 0),
+    Total = utr_TRUE + utr_FALSE,
+    Percent = 100 * utr_TRUE / Total
+  )
+
+
+# Order first by cluster, then by PC1 within each cluster
+pca_order <- pca_df %>%
+  dplyr::arrange(Cluster, PC1) %>%
+  dplyr::pull(Gene)
+
+
+utr_percent$Gene <- factor(utr_percent$Gene, levels = pca_order)
+
+pca_df$Gene      # gene names
+pca_df$Cluster   # cluster assignment (1, 2, 3)
+
+
+# Add cluster info to utr_percent based on PCA
+utr_percent <- utr_percent %>%
+  dplyr::left_join(pca_df %>% dplyr::select(Gene, Cluster), by = "Gene") %>%
+  dplyr::mutate(
+    Cluster = factor(Cluster,
+      levels = c(1, 2, 3)
+    )
+  )
+
+utr_percent <- utr_percent %>%
+  dplyr::arrange(Cluster, dplyr::desc(Percent)) %>%
+  dplyr::mutate(Gene = factor(Gene, levels = Gene))
+
+
+
+cluster_colors <- c(
+  "2" = "firebrick",
+  "1" = "#4daf4a",
+  "3" = "#377eb8"
+)
+
+
+
+
+
+
+summary_plot_onco <- ggplot(utr_percent, aes(x = Gene, y = Percent, fill = Cluster)) +
+  geom_col(width = 0.65, color = "black") +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  scale_fill_manual(values = cluster_colors) +
+  labs(
+    title = "Frequency of Fusions Replacing 5′ UTR",
+    subtitle = "Color reflects 5′ UTR structural cluster",
+    x = "", y = "% of UTR-Replacing Fusions", fill = "PCA Cluster"
+  ) +
+  theme_bw(base_size = 14) +
+    theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(face = "italic", size = 12, hjust = 0.5),
+    axis.text.x = element_text(size = 12, face = "bold", angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 14, face = "bold")
+  )
+
+ggsave("frequency_fusions.png", plot = summary_plot_onco, dpi = 600, width = 8, height = 6)
+
+
+```
+
+
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+
+# Step 1: Ensure data is prepared
+utr_percent <- utr_summary_wide %>%
+  mutate(
+    Total = utr_TRUE + utr_FALSE,
+    Percent = 100 * utr_TRUE / Total
+  )
+
+# Step 2: Add PCA cluster info
+utr_percent <- utr_percent %>%
+  left_join(pca_df %>% dplyr::select(Gene, Cluster), by = "Gene")
+
+# Step 3: Define cluster as factor
+utr_percent$Cluster <- factor(utr_percent$Cluster, levels = c(1, 2, 3))
+
+# Step 4: Plot
+stat <- ggplot(utr_percent, aes(x = Cluster, y = Percent, fill = Cluster)) +
+  geom_violin(trim = FALSE, alpha = 0.7, color = NA) +
+  geom_jitter(width = 0.15, size = 3, color = "black", alpha = 0.6) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 4, fill = "white", color = "black") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", 
+                     comparisons = list(
+                       c("High Complexity", "Intermediate"),
+                       c("High Complexity", "Low"),
+                       c("Intermediate", "Low")
+                     )) +
+  labs(
+    title = "UTR Replacement Frequency by 5′ UTR Structural Cluster",
+    subtitle = "Oncogenes with complex UTRs tend to undergo replacement less frequently",
+    x = "5′ UTR Complexity Cluster", y = "% of UTR-Replacing Fusions"
+  ) +
+  scale_fill_manual(values = c("2" = "firebrick",
+  "1" = "#4daf4a",
+  "3" = "#377eb8")) +
+  theme_bw(base_size = 14) +
+   theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(face = "italic", size = 12, hjust = 0.5),
+    axis.text.x = element_text(size = 12, face = "bold", angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 14, face = "bold")
+  ) +
+  stat_compare_means(method = "kruskal.test", label.y = 35) +  # overall test
+  stat_compare_means(
+    comparisons = list(c("1", "2"), c("1", "3"), c("2", "3")),
+    method = "wilcox.test",
+    label = "p.value",
+    label.y = c(30, 32, 34)
+  )
+```
+
+
+### Fusion partners
+
+```{r}
+# Get fusion partners from UTR-replacing fusions for each oncogene
+utr_partners_list <- lapply(onco, function(gene) {
+  tsv_file <- paste0("table_", gene, ".tsv")
+  result <- check_utr_replacement(tsv_file, gene)
+
+  if (!is.null(result)) {
+    partners <- result$fusion_table %>%
+      dplyr::filter(utr_replaced_strict == TRUE) %>%
+      dplyr::pull(`Gene 1`) %>%
+      unique()
+    
+    if (length(partners) > 0) {
+      return(data.frame(Oncogene = gene, Partner = partners, stringsAsFactors = FALSE))
+    }
+  }
+  
+  return(NULL)  # Skip if no valid partners
+})
+
+# Combine into a single data frame
+utr_partners_df <- do.call(rbind, utr_partners_list)
+
+# View result
+print(utr_partners_df)
+
+
+
+
+```
+### Extract UTR features
+
+```{r}
+# Make sure all gene names match format
+partner_utr_features <- all_utr %>%
+  dplyr::filter(
+    hgnc_symbol %in% utr_partners_df$Partner,
+    transcript_is_canonical == 1
+  ) %>%
+  dplyr::mutate(Source = "Fusion Partner")
+
+# Similarly, subset oncogene UTRs
+oncogene_utr_features <- all_utr %>%
+  dplyr::filter(
+    hgnc_symbol %in% utr_partners_df$Oncogene,
+    transcript_is_canonical == 1
+  ) %>%
+  dplyr::mutate(Source = "Oncogene")
+
+# Combine for plotting
+utr_compare_df <- dplyr::bind_rows(partner_utr_features, oncogene_utr_features)
+
+saveRDS(utr_compare_df, "utr_fusionsvsoncogenes.rds")
+
+utr_compare_df <- readRDS("utr_fusionsvsoncogenes.rds")
+
+```
+
+### Compare
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Combine partner + oncogene 5'UTR features
+utr_pca_input <- all_utr %>%
+  dplyr::filter(hgnc_symbol %in% unique(utr_partners_df$Partner) |
+                hgnc_symbol %in% unique(utr_partners_df$Oncogene)) %>%
+  dplyr::mutate(Group = ifelse(hgnc_symbol %in% unique(utr_partners_df$Partner),
+                               "Fusion Partner", "Oncogene"))
+
+
+
+library(ggplot2)
+library(ggrepel)
+
+# Step 1: Prepare matrix
+utr_features_matrix <- utr_pca_input %>%
+  dplyr::select(utr_length, gc_content, uorf_count, mfe) %>%
+  dplyr::mutate(mfe = ifelse(is.na(mfe), 0, mfe)) %>%  # Replace NA MFE with 0
+  scale()
+  
+
+# Step 2: PCA
+pca_result <- prcomp(utr_features_matrix, center = TRUE, scale. = TRUE)
+pca_df <- as.data.frame(pca_result$x)
+pca_df$Gene <- utr_pca_input$hgnc_symbol
+pca_df$Group <- utr_pca_input$Group
+
+# Step 3: Plot
+p <- ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 3, alpha = 0.9) +
+  ggrepel::geom_text_repel(aes(label = Gene), size = 4, max.overlaps = 20) +
+  stat_ellipse(aes(group = Group), linetype = "dashed", alpha = 0.4) +
+  labs(
+    title = "PCA of 5′ UTR Features",
+    subtitle = "Oncogenes vs. Fusion Partners",
+    x = "PC1", y = "PC2"
+  ) +
+  scale_color_manual(values = c("Oncogene" = "firebrick", "Fusion Partner" = "steelblue")) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "top",
+    legend.title = element_blank()
+  )
+
+
+
+# Required libraries
+library(dplyr)
+library(fmsb)  # For radar plot
+
+# Prepare data: summarize mean UTR features for each group
+radar_data <- utr_pca_input %>%
+  dplyr::group_by(Group) %>%
+  dplyr::summarise(
+    Length = mean(utr_length, na.rm = TRUE),
+    GC = mean(gc_content, na.rm = TRUE),
+    uORFs = mean(uorf_count, na.rm = TRUE),
+    MFE = mean(mfe, na.rm = TRUE)
+  ) %>%
+  as.data.frame()
+
+# Reorder to match radar plot layout: rows = groups
+rownames(radar_data) <- radar_data$Group
+radar_data$Group <- NULL
+
+# Optional: Flip MFE sign to make it intuitively interpretable (more negative = more complex)
+radar_data$MFE <- -radar_data$MFE
+
+# Normalize all features to 0–1 range for radar visualization
+radar_scaled <- as.data.frame(scale(radar_data, center = FALSE, scale = apply(radar_data, 2, max)))
+
+# Add min/max rows required by `fmsb::radarchart`
+radar_scaled <- rbind(rep(1, ncol(radar_scaled)), rep(0, ncol(radar_scaled)), radar_scaled)
+
+# Plot
+colors_border <- c("darkred", "steelblue")
+colors_fill <- c("#F08080AA", "#87CEEBAA")  # Transparent fills
+
+# Set your color palette
+colors_border <- c("red", "blue")
+colors_fill <- c(rgb(1, 0, 0, 0.2), rgb(0, 0, 1, 0.2))
+
+# Save to PNG
+png("utr_features_radar.png", width = 1000, height = 1000, res = 150)
+
+# Adjust margins (bottom, left, top, right)
+par(mar = c(2, 2, 4, 2))
+
+radarchart(
+  radar_scaled,
+  axistype = 1,
+  pcol = colors_border,
+  pfcol = colors_fill,
+  plwd = 2,
+  plty = 1,
+  cglcol = "grey70", cglty = 1,
+  axislabcol = "black",
+  vlcex = 1.1,
+  title = "Comparison of 5′ UTR Features\nOncogenes vs. Fusion Partners"
+)
+
+legend(
+  x = "bottomright",
+  legend = c("Oncogene", "Fusion Partner"),
+  bty = "n",
+  pch = 20,
+  col = colors_border,
+  text.col = "black",
+  pt.cex = 2
+)
+
+dev.off()
+
+ggsave("pca_partners.png", plot = p, dpi = 600, width = 8, height = 8)
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# Prepare summary of average feature values per group
+feature_averages <- utr_compare_df %>%
+  group_by(Source) %>%
+  summarise(
+    `5′ UTR Length (nt)` = mean(utr_length, na.rm = TRUE),
+    `GC Content (%)` = mean(gc_content, na.rm = TRUE),
+    `# uORFs` = mean(uorf_count, na.rm = TRUE),
+    `MFE (kcal/mol)` = mean(mfe, na.rm = TRUE)
+  ) %>%
+  pivot_longer(
+    cols = -Source,
+    names_to = "Feature",
+    values_to = "Value"
+  )
+
+# Order Source to show Oncogene first
+feature_averages$Source <- factor(feature_averages$Source, levels = c("Oncogene", "Fusion Partner"))
+
+# Plot: Faceted barplots with individual y scales
+avg_plot <- ggplot(feature_averages, aes(x = Source, y = Value, fill = Source)) +
+  geom_col(width = 0.6, alpha = 0.9) +
+  facet_wrap(~ Feature, scales = "free_y", nrow = 1) +
+  geom_text(aes(label = round(Value, 1)), vjust = -0.5, size = 5, fontface = "bold") +
+  scale_fill_manual(values = c("Oncogene" = "firebrick", "Fusion Partner" = "#3182bd")) +
+  labs(
+    title = "Oncogenes Have More Complex 5′ UTRs Than Their Fusion Partners",
+    subtitle = "Comparison of Average UTR Features",
+    x = "", y = "Average Value"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 13, face = "bold"),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1, face = "bold")
+  )
+
+# Save high-res
+ggsave("utr_feature_averages_onco_vs_partners.png", avg_plot, width = 11, height = 4.5, dpi = 300)
+
+# Display plot
+avg_plot
+
+
+
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggpubr)
+
+# Replace with your loaded data if not already present
+# utr_compare_df <- readRDS("utr_fusionsvsoncogenes.rds")
+
+# Clean and filter features
+utr_violin_data <- utr_compare_df %>%
+  dplyr::select(Source, utr_length, uorf_count, gc_content, mfe) %>%
+  dplyr::rename(
+    Length = utr_length,
+    uORFs = uorf_count,
+    GC = gc_content,
+    MFE = mfe
+  ) %>%
+  pivot_longer(
+    cols = c(Length, uORFs, GC, MFE),
+    names_to = "Feature",
+    values_to = "Value"
+  ) %>%
+  dplyr::filter(!is.na(Value))
+
+# Set display order
+utr_violin_data$Feature <- factor(
+  utr_violin_data$Feature,
+  levels = c("uORFs", "Length", "GC", "MFE"),
+  labels = c("# uORFs", "5′ UTR Length (nt)", "GC Content (%)", "MFE (kcal/mol)")
+)
+
+# Violin plot with statistical comparison
+violin <- ggplot(utr_violin_data, aes(x = Source, y = Value, fill = Source)) +
+  geom_violin(trim = FALSE, alpha = 0.7) +
+  geom_jitter(width = 0.15, size = 1.8, alpha = 0.7) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3, fill = "white") +
+  #stat_compare_means(method = "wilcox.test", label = "p.format", 
+                    # label.y.npc = "top", size = 4) +
+  facet_wrap(~ Feature, scales = "free_y", nrow = 1) +
+  scale_fill_manual(values = c("Oncogene" = "firebrick", "Fusion Partner" = "steelblue")) +
+  labs(
+    title = "5′ UTR Features of Oncogenes vs Fusion Partners",
+    subtitle = "White diamonds represent the group means",
+    x = "", y = "Value"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    axis.text.x = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+# Save high-res
+ggsave("utr_feature_averages_onco_vs_partners.png", violin, width = 11, height = 4.5, dpi = 600)
+
+
+```
+
+
+
+```{r}
+# Example of what we need
+# Add this to your violin data creation step
+utr_violin_data <- utr_compare_df %>%
+  dplyr::select(hgnc_symbol, Source, utr_length, uorf_count, gc_content, mfe) %>%
+  tidyr::pivot_longer(
+    cols = c(utr_length, uorf_count, gc_content, mfe),
+    names_to = "Feature",
+    values_to = "Value"
+  ) %>%
+  dplyr::mutate(
+    Feature = dplyr::recode(Feature,
+                            utr_length = "5′ UTR Length (nt)",
+                            uorf_count = "# uORFs",
+                            gc_content = "GC Content (%)",
+                            mfe = "MFE (kcal/mol)"
+    ),
+    Source = factor(Source, levels = c("Oncogene", "Fusion Partner"))
+  )
+
+
+utr_violin_tagged <- utr_violin_data %>%
+  dplyr::rename(Gene = hgnc_symbol) %>%
+  dplyr::left_join(utr_partners_df, by = c("Gene" = "Partner")) %>%
+  dplyr::mutate(Oncogene = ifelse(Source == "Oncogene", Gene, Oncogene)) %>%
+  dplyr::filter(!is.na(Oncogene))
+
+
+
+# Step 2: Set Source order
+utr_violin_tagged$Source <- factor(utr_violin_tagged$Source, levels = c("Oncogene", "Fusion Partner"))
+
+# Step 3: Violin plot with connection lines
+violin_pairs <- ggplot(utr_violin_tagged, aes(x = Source, y = Value, fill = Source)) +
+  geom_line(aes(group = Oncogene), color = "gray40", linetype = "dotted", position = position_dodge(width = 0.4)) +
+  geom_violin(trim = FALSE, alpha = 0.7) +
+  geom_jitter(width = 0.15, size = 1.8, alpha = 0.7) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3, fill = "white") +
+  facet_wrap(~ Feature, scales = "free_y", nrow = 1) +
+  scale_fill_manual(values = c("Oncogene" = "firebrick", "Fusion Partner" = "steelblue")) +
+  labs(
+    title = "5′ UTR Features of Oncogenes vs Fusion Partners",
+    subtitle = "Dotted lines connect paired oncogene–partner combinations",
+    x = "", y = "Value"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    axis.text.x = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+# Save the high-res plot
+ggsave("utr_feature_violin_paired.png", violin_pairs, width = 11, height = 4.5, dpi = 600)
+
+```
+
+
+```{r}
+# Step 1: Create a mapping table with all valid Oncogene–Partner pairs
+pair_map <- utr_partners_df %>%
+  rename(FusionPartner = Partner)
+
+# Step 2: Join the violin data for fusion partners with all possible oncogene matches
+fusion_partners_expanded <- utr_violin_data %>%
+  filter(Source == "Fusion Partner") %>%
+  rename(FusionPartner = hgnc_symbol) %>%
+  left_join(pair_map, by = "FusionPartner")
+
+# Step 3: Add Oncogene rows back in, keeping Source column aligned
+oncogene_data <- utr_violin_data %>%
+  filter(Source == "Oncogene") %>%
+  rename(Oncogene = hgnc_symbol)
+
+# Step 4: Combine both sets
+utr_violin_tagged <- bind_rows(
+  oncogene_data,
+  fusion_partners_expanded %>% rename(hgnc_symbol = FusionPartner)
+) %>%
+  filter(!is.na(Oncogene))
+
+# Step 5: Draw violin plot with dotted lines reflecting many-to-one
+utr_violin_tagged$Source <- factor(utr_violin_tagged$Source, levels = c("Oncogene", "Fusion Partner"))
+
+library(ggpubr)
+
+# Format p-values to 1 decimal point manually
+p_label_fmt <- function(p) {
+  if (is.na(p)) return("p = NA")
+  if (p < 0.001) return("p < 0.001")
+  paste0("p = ", round(p, 2))
+}
+
+# Generate violin plot with precomputed stats
+violin_pairs <- ggplot(utr_violin_tagged, aes(x = Source, y = Value, fill = Source)) +
+  geom_line(aes(group = interaction(Oncogene, Feature)), color = "gray40", linetype = "dotted",
+            position = position_dodge(width = 0.4), alpha = 0.6) +
+  geom_violin(trim = FALSE, alpha = 0.7) +
+  geom_jitter(width = 0.15, size = 1.8, alpha = 0.7) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3, fill = "white") +
+  facet_wrap(~ Feature, scales = "free_y", nrow = 1) +
+  scale_fill_manual(values = c("Oncogene" = "firebrick", "Fusion Partner" = "steelblue")) +
+  labs(
+    title = "5′ UTR Features of Oncogenes vs Fusion Partners",
+    subtitle = "Dotted lines connect all oncogene–partner combinations",
+    x = "", y = ""
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    axis.text.x = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+# Compute stats and add manually formatted p-values
+p_df <- compare_means(Value ~ Source, group.by = "Feature", data = utr_violin_tagged, method = "wilcox.test")
+p_df$label <- sapply(p_df$p, p_label_fmt)
+
+# Add as annotation layer
+violin_pairs <- violin_pairs +
+  geom_text(data = p_df, aes(x = 1.5, y = Inf, label = label), vjust = 1.5, size = 4, inherit.aes = FALSE)
+
+# Save the output
+ggsave("utr_feature_violin_paired_final.png", violin_pairs, width = 11, height = 4.5, dpi = 600)
+```
+
+
+## Tble for supp data
+
+```{r}
+library(readr)
+library(dplyr)
+
+# Load clinical metadata
+clinical_data <- read_tsv("genie_public_clinical_data_v17.tsv")
+
+# Peek at the structure
+glimpse(clinical_data)
+
+
+library(dplyr)
+library(readr)
+
+# Oncogenes to evaluate
+onco <- c("MET", "EGFR", "ALK", "NTRK2", "FGFR1", "FGFR2", "MYCL", "JAK2", "PDGFRB",
+          "FGFR3", "MYC", "MYCN", "JAK1", "NTRK3", "ETV4", "ABL1", "ETV1", "KRAS",
+          "ETV5", "HRAS", "RET", "BRAF", "ERBB2", "ROS1", "NRAS", "NTRK1", "PDGFRA", "ERG")
+
+# Loop to collect Sample IDs with UTR-replaced fusions
+utr_fusion_samples <- lapply(onco, function(gene) {
+  tsv_file <- paste0("table_", gene, ".tsv")
+  result <- check_utr_replacement(tsv_file, gene)
+  
+  if (!is.null(result)) {
+    result$fusion_table %>%
+      dplyr::filter(utr_replaced_strict == TRUE) %>%
+      dplyr::select(`Sample ID`, `Gene 1`, `Gene 2`) %>%
+      mutate(Oncogene = gene)
+  } else {
+    NULL
+  }
+})
+
+# Combine into one data frame
+utr_fusion_samples_df <- do.call(rbind, utr_fusion_samples)
+
+# View result
+head(utr_fusion_samples_df)
+
+
+# Join fusion samples with clinical annotations
+utr_fusions_annotated <- utr_fusion_samples_df %>%
+  dplyr::left_join(clinical_data, by = c("Sample ID"))
+
+# Peek at the result
+glimpse(utr_fusions_annotated)
+
+# Optional: Count occurrences by oncogene and cancer type
+fusion_summary_by_cancer <- utr_fusions_annotated %>%
+  dplyr::count(Oncogene, `Cancer Type`, name = "Fusion_Count") %>%
+  dplyr::arrange(Oncogene, desc(Fusion_Count))
+```
+
+```{r}
+library(dplyr)
+library(flextable)
+
+# Start with your merged data (assumed name: utr_fusions_annotated)
+# Summarize to generate the table structure
+final_table <- utr_fusions_annotated %>%
+  group_by(Oncogene, `Gene 1`, `Cancer Type Detailed`) %>%
+  summarise(
+    Fusion_Count = n(),
+    .groups = "drop"
+  ) %>%
+  group_by(Oncogene, `Gene 1`) %>%
+  summarise(
+    Total_Fusions = sum(Fusion_Count),
+    Unique_Cancer_Types = n_distinct(`Cancer Type Detailed`),
+    Top_Cancer_Types = paste(unique(`Cancer Type Detailed`), collapse = "; "),
+    .groups = "drop"
+  )
+
+# Join 5'UTR features (assumes utr_compare_df exists with Source = "Oncogene"/"Fusion Partner")
+utr_features_clean <- utr_compare_df %>%
+  dplyr::select(hgnc_symbol, Source, utr_length, gc_content, uorf_count, mfe)
+
+# Get features separately for Oncogenes and Partners
+onco_feats <- utr_features_clean %>% filter(Source == "Oncogene")
+partner_feats <- utr_features_clean %>% filter(Source == "Fusion Partner")
+
+# Join into the table
+final_table_annotated <- final_table %>%
+  left_join(onco_feats, by = c("Oncogene" = "hgnc_symbol")) %>%
+  left_join(partner_feats, by = c("Gene 1" = "hgnc_symbol"), suffix = c("_Oncogene", "_Partner"))
+
+# Rename for readability
+final_table_clean <- final_table_annotated %>%
+  rename(
+    Partner = `Gene 1`,
+    `5' UTR Length Oncogene` = utr_length_Oncogene,
+    `5' UTR %GC Oncogene` = gc_content_Oncogene,
+    `5' UTR #uORF Oncogene` = uorf_count_Oncogene,
+    `5' UTR MFE Oncogene` = mfe_Oncogene,
+    `5' UTR Length Partner` = utr_length_Partner,
+    `5' UTR %GC Partner` = gc_content_Partner,
+    `5' UTR #uORF Partner` = uorf_count_Partner,
+    `5' UTR MFE Partner` = mfe_Partner
+  )
+
+final_table_clean2 <- na.omit(final_table_clean)
+
+final_table_clean2 <- final_table_clean2 %>%
+  rename(
+    `Fusion Partner` = Partner,
+    `# Occurence` = Total_Fusions,
+    `# Cancer Types` = Unique_Cancer_Types,
+    `Cancer Types` = Top_Cancer_Types,
+  )
+
+final_table_clean2 <- final_table_clean2[,-c(4,6,11)]
+
+saveRDS(final_table_clean2, "final_table.rds")
+
+final_table_clean2 <- readRDS("final_table.rds")
+
+
+
+# Create a nice flextable
+library(flextable)
+
+# Define color groupings
+red_cols <- c("Oncogene", "5' UTR Length Oncogene", "5' UTR %GC Oncogene", "5' UTR #uORF Oncogene", "5' UTR MFE Oncogene")
+blue_cols <- c("Fusion Partner", "5' UTR Length Partner", "5' UTR %GC Partner", "5' UTR #uORF Partner", "5' UTR MFE Partner")
+
+# Intersect with actual columns in the table
+red_cols_exist <- intersect(red_cols, colnames(final_table_clean2))
+blue_cols_exist <- intersect(blue_cols, colnames(final_table_clean2))
+other_cols <- setdiff(colnames(final_table_clean2), c(red_cols_exist, blue_cols_exist))
+
+# Build the flextable
+ft <- flextable(final_table_clean2) %>%
+  autofit() %>%
+  theme_booktabs() %>%
+  color(j = red_cols_exist, color = "firebrick") %>%
+  color(j = blue_cols_exist, color = "steelblue") %>%
+  color(j = other_cols, color = "black") %>%
+  add_header_lines("Summary of 5′ UTR-Replacing Fusions by Oncogene and Fusion Partner") %>%
+  fontsize(size = 12, part = "all") %>%
+  fontsize(size = 14, part = "header") %>%
+  align(part = "header", align = "center")
+
+# Save as image (not cropped)
+save_as_image(ft, path = "utr_fusion_summary_table.png", zoom = 2, webshot = "webshot2")
+```
+
+
+
+
+```{r}
+library(biomaRt)
+library(dplyr)
+library(stringr)
+library(purrr)
+
+# -- Functions you already defined --
+uorf_count <- function(seq) {
+  seq <- toupper(seq)
+  n <- nchar(seq)
+  count <- 0
+  i <- 1
+
+  while (i <= (n - 2)) {
+    codon <- substr(seq, i, i + 2)
+
+    if (codon == "ATG") {
+      j <- i + 3
+      found_stop <- FALSE
+
+      while (j + 2 <= n) {
+        stop_codon <- substr(seq, j, j + 2)
+        if (stop_codon %in% c("TAA", "TAG", "TGA") && ((j - i) %% 3 == 0)) {
+          count <- count + 1
+          i <- j + 3
+          found_stop <- TRUE
+          break
+        }
+        j <- j + 3
+      }
+
+      if (!found_stop) {
+        i <- i + 3
+      }
+    } else {
+      i <- i + 1
+    }
+  }
+
+  return(count)
+}
+
+compute_rnafold <- function(seq) {
+  rnafold_path <- "/opt/miniconda3/envs/vienna-env/bin/RNAfold"
+  tmp_file <- tempfile()
+  writeLines(seq, tmp_file)
+
+  output <- system2(rnafold_path, args = tmp_file, stdout = TRUE)
+
+  if (length(output) < 2) return(NA)
+
+  structure_line <- output[2]
+  mfe <- as.numeric(sub(".*\\(([0-9.\\-]+)\\).*", "\\1", structure_line))
+
+  return(mfe)
+}
+
+
+
+
+
+```
+
+```{r}
+
+utr_ntrk2 <- utr_table %>%
+  dplyr::filter(Gene == "NTRK2") %>%
+  dplyr::transmute(
+    partner = "NTRK2",
+    utr_length = `5′ UTR Length (nt)`,
+    gc_content = `GC Content (%)`,
+    uorfs = `# uORFs`,
+    mfe = `MFE (kcal/mol)`
+  )
+
+
+# Add a group label (Oncogene vs. Fusion Partner)
+utr_features$group <- ifelse(utr_features$partner == "NTRK2", "NTRK2", "Fusion Partner")
+
+utr_combined <- bind_rows(utr_ntrk2, utr_features)
+utr_combined$group <- ifelse(utr_combined$partner == "NTRK2", "NTRK2", "Fusion Partner")
+
+
+# Pivot longer for easier ggplot usage
+library(tidyr)
+
+library(tidyr)
+
+utr_long <- utr_combined %>%
+  pivot_longer(
+    cols = c(utr_length, gc_content, uorfs, mfe),
+    names_to = "Feature",
+    values_to = "Value"
+  )
+
+
+
+
+library(ggplot2)
+
+ggplot(utr_long, aes(x = group, y = Value, fill = group)) +
+  geom_boxplot(width = 0.5, alpha = 0.8, outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 2, color = "black", alpha = 0.6) +
+  facet_wrap(~ Feature, scales = "free_y") +
+  scale_fill_manual(values = c("NTRK2" = "firebrick", "Fusion Partner" = "gray70")) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Fusion Partners Replace the 5′ UTR of NTRK2 with Simpler Sequences",
+    x = "", y = "Feature Value"
+  ) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(size = 12, face = "bold"),
+    strip.text = element_text(face = "bold")
+  )
+
+```
+
+```{r}
+plot_dumbbell_comparison <- function(oncogene, partner_values, utr_table) {
+  # Validate column names
+  expected_cols <- c("Gene", "5′ UTR Length (nt)", "GC Content (%)", "# uORFs", "MFE (kcal/mol)")
+  if (!all(expected_cols %in% names(utr_table))) {
+    stop("Your 'utr_table' does not have the expected column names.")
+  }
+
+  # Find the oncogene row
+  oncogene_row <- utr_table %>% filter(Gene == oncogene)
+  if (nrow(oncogene_row) == 0) {
+    stop(paste("Gene", oncogene, "not found in utr_table"))
+  }
+
+  # Prepare tidy data
+  df <- tibble::tibble(
+    Feature = factor(c("5′ UTR Length (nt)", "GC Content (%)", "# uORFs", "MFE (kcal/mol)"),
+                     levels = c("5′ UTR Length (nt)", "GC Content (%)", "# uORFs", "MFE (kcal/mol)")),
+    Oncogene = c(
+      oncogene_row[[ "5′ UTR Length (nt)" ]],
+      oncogene_row[[ "GC Content (%)" ]],
+      oncogene_row[[ "# uORFs" ]],
+      oncogene_row[[ "MFE (kcal/mol)" ]]
+    ),
+    Partner = partner_values
+  ) %>%
+    pivot_longer(cols = c(Oncogene, Partner), names_to = "Group", values_to = "Value")
+
+  # Dumbbell plot with facets per feature
+  ggplot(df, aes(x = Group, y = Value, fill = Group)) +
+    geom_col(position = position_dodge(width = 0.7), width = 0.6, color = "black") +
+    facet_wrap(~ Feature, scales = "free_y", ncol = 2) +
+    scale_fill_manual(values = c("Oncogene" = "firebrick", "Partner" = "gray40")) +
+    labs(
+      title = paste("5′ UTR Feature Comparison:", oncogene),
+      subtitle = "Oncogene vs Fusion Partner Averages",
+      x = "", y = "Value"
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+      plot.subtitle = element_text(hjust = 0.5, size = 11),
+      axis.text.x = element_text(face = "bold", size = 12),
+      strip.text = element_text(face = "bold", size = 13),
+      legend.position = "none"
+    )
+}
+
+partner_values <- c(97.5, 58.23, 0, -28.3)
+plot_dumbbell_comparison("NTRK2", partner_values, utr_table)
+
+
+```
+
+
+
+```{r}
+partners <- result_NTRK2$fusion_table %>%
+  dplyr::filter(utr_replaced == TRUE) %>%
+  pull(`Gene 1`) %>%
+  unique()
+
+
+# -- Step 2: Get canonical transcript and UTR sequence --
+ensembl <- useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl")
+
+tx_info <- getBM(
+  attributes = c("ensembl_transcript_id", "hgnc_symbol"),
+  filters = "hgnc_symbol",
+  values = partners,
+  mart = ensembl
+) %>%
+  group_by(hgnc_symbol) %>%
+  slice(1) %>%
+  ungroup()
+
+utr_seqs <- getSequence(
+  id = tx_info$ensembl_transcript_id,
+  type = "ensembl_transcript_id",
+  seqType = "5utr",
+  mart = ensembl
+)
+
+# -- Step 3: Compute features (length, GC, uORF, MFE) --
+utr_features <- utr_seqs %>%
+  mutate(
+    utr_length = nchar(`5utr`),
+    gc_content = 100 * str_count(`5utr`, "[GCgc]") / utr_length,
+    uorfs = map_int(`5utr`, uorf_count),
+    mfe = map_dbl(`5utr`, ~ compute_rnafold(.x)[["mfe"]]),
+    partner = tx_info$hgnc_symbol[match(ensembl_transcript_id, tx_info$ensembl_transcript_id)]
+  )
+
+# -- Step 4: Summary --
+print(utr_features)
+summary(utr_features$utr_length)
+summary(utr_features$gc_content)
+summary(utr_features$uorfs)
+summary(utr_features$mfe)
+
+
+
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Select numeric features
+utr_pca_data <- utr_table %>%
+  dplyr::select(Gene, `5′ UTR Length (nt)`, `GC Content (%)`, `# uORFs`, `MFE (kcal/mol)`)
+
+# Rename columns for easier handling
+utr_pca_data <- utr_pca_data %>%
+  rename(
+    Length = `5′ UTR Length (nt)`,
+    GC = `GC Content (%)`,
+    uORFs = `# uORFs`,
+    MFE = `MFE (kcal/mol)`
+  )
+
+# Scale the features (important for PCA)
+utr_scaled <- scale(utr_pca_data[, -1])
+
+# Run PCA
+pca <- prcomp(utr_scaled, center = TRUE, scale. = TRUE)
+
+# Combine scores with gene names
+pca_df <- as.data.frame(pca$x)
+pca_df$Gene <- utr_pca_data$Gene
+
+# Plot first two principal components
+ggplot(pca_df, aes(x = PC1, y = PC2, label = Gene)) +
+  geom_point(color = "firebrick", size = 3) +
+  geom_text(vjust = -0.6, size = 4) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "PCA of Oncogene 5′ UTR Features",
+    x = "PC1",
+    y = "PC2"
+  )
+
+```
+
+
+
+
+```{r}
+annotate_donor_exon1 <- function(fusion_table) {
+  library(biomaRt)
+  library(dplyr)
+  library(purrr)
+
+  # Step 1: Get canonical transcript from GRCh38
+  ensembl38 <- useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl")
+  
+  partner_genes <- unique(fusion_table$`Gene 1`)
+  
+  canonical_tx <- getBM(
+    attributes = c("ensembl_transcript_id", "hgnc_symbol"),
+    filters = "hgnc_symbol",
+    values = partner_genes,
+    mart = ensembl38
+  )
+
+  # Step 2: For each gene, keep first transcript (proxy for canonical)
+  canonical_tx <- canonical_tx %>%
+    group_by(hgnc_symbol) %>%
+    slice(1) %>%
+    ungroup()
+
+  # Step 3: Prepare GRCh37 connection
+  ensembl37 <- useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl", GRCh = 37)
+
+  # Step 4: For each transcript, get exon 1 and CDS start info
+  donor_info <- purrr::map_dfr(1:nrow(canonical_tx), function(i) {
+    gene <- canonical_tx$hgnc_symbol[i]
+    tx_id <- canonical_tx$ensembl_transcript_id[i]
+
+    exon1_info <- getBM(
+      attributes = c("ensembl_transcript_id", "exon_chrom_start", "exon_chrom_end", "rank"),
+      filters = "ensembl_transcript_id",
+      values = tx_id,
+      mart = ensembl37
+    ) %>% dplyr::filter(rank == 1)
+
+    cds_info <- getBM(
+      attributes = c("ensembl_transcript_id", "genomic_coding_start", "strand", "chromosome_name"),
+      filters = "ensembl_transcript_id",
+      values = tx_id,
+      mart = ensembl37
+    )
+
+    if (nrow(exon1_info) == 0 || nrow(cds_info) == 0) return(NULL)
+
+    tibble(
+      gene = gene,
+      transcript_id = tx_id,
+      exon1_start = min(exon1_info$exon_chrom_start, na.rm = TRUE),
+      exon1_end   = max(exon1_info$exon_chrom_end, na.rm = TRUE),
+      cds_start   = cds_info$genomic_coding_start[1],
+      strand      = cds_info$strand[1],
+      chromosome  = as.character(cds_info$chromosome_name[1])  # <- Fixed for join
+    )
+  })  # <-- this was missing
+
+  # Standardize column name before join/mutate
+fusion_table <- fusion_table %>%
+  rename(Site1_Position = `Site1 Position`)
+  
+  # Step 5: Join and annotate fusions
+  annotated_fusions <- fusion_table %>%
+    left_join(donor_info, by = c("Gene 1" = "gene", "Site1 Chromosome" = "chromosome")) %>%
+    mutate(
+      donor_exon1 = case_when(
+        is.na(Site1_Position) ~ FALSE,
+        strand == 1 &
+          Site1_Position >= exon1_start &
+          Site1_Position <= exon1_end &
+          Site1_Position < cds_start ~ TRUE,
+        strand == -1 &
+          Site1_Position >= exon1_start &
+          Site1_Position <= exon1_end &
+          Site1_Position > cds_start ~ TRUE,
+        TRUE ~ FALSE
+      )
+    )
+
+  return(annotated_fusions)
+}
+
+```
+
+
+```{r}
+fusion_table <- result_MET$fusion_table
+fusion_table <- annotate_donor_exon1(fusion_table)
+
+# See how many are clean UTR-replacing fusions:
+table(fusion_table$utr_replaced_strict & fusion_table$donor_exon1)
+
+```
+
+
+
+
+
+```{r}
+# Your list of oncogenes
+oncogenes <- c(
+  "MET", "ALK", "ROS1", "RET", "EGFR", "ERBB2", "FGFR1", "FGFR2", "FGFR3",
+  "NTRK1", "NTRK2", "NTRK3", "BRAF", "PDGFRA", "PDGFRB", "ABL1",
+  "JAK1", "JAK2", "MYC", "MYCN", "MYCL", "ERG", "ETV1", "ETV4", "ETV5",
+  "HRAS", "KRAS", "NRAS"
+)
+
+# Initialize storage
+summary_list <- list()
+
+for (gene in oncogenes) {
+  tsv_file <- paste0("table_", gene, ".tsv")
+  
+  if (!file.exists(tsv_file)) {
+    warning(paste("File not found:", tsv_file))
+    next
+  }
+  
+  message("Processing ", gene, " ...")
+  result <- tryCatch({
+    check_utr_replacement(tsv_file, gene)
+  }, error = function(e) {
+    warning(paste("Error with", gene, ":", e$message))
+    return(NULL)
+  })
+  
+  if (!is.null(result)) {
+    counts <- result$summary
+    summary_list[[gene]] <- data.frame(
+      Gene = gene,
+      Total_Fusions = sum(counts),
+      UTR_Replaced = counts[["TRUE"]],
+      Percent_Replaced = round(100 * counts[["TRUE"]] / sum(counts), 1)
+    )
+  }
+}
+
+# Combine results
+fusion_summary <- do.call(rbind, summary_list)
+
+# Replace NAs with 0 where no UTR-Replaced events were found
+fusion_summary$UTR_Replaced[is.na(fusion_summary$UTR_Replaced)] <- 0
+fusion_summary$Percent_Replaced[is.na(fusion_summary$Percent_Replaced)] <- 0
+
+# View final table
+fusion_summary
+
+```
+
+
+
+```{r}
+canonical_tx <- getBM(
+  attributes = c("ensembl_transcript_id", "hgnc_symbol", "transcript_is_canonical"),
+  filters = "hgnc_symbol",
+  values = "NTRK2",
+  mart = ensembl38
+) %>%
+  dplyr::filter(transcript_is_canonical == 1) %>%
+  slice(1)
+
+tx_coords <- getBM(
+  attributes = c("ensembl_transcript_id", "genomic_coding_start", 
+                 "strand", "chromosome_name"),
+  filters = "ensembl_transcript_id",
+  values = canonical_tx$ensembl_transcript_id,
+  mart = ensembl37
+)
+
+
+translation_start <- if (unique(tx_coords$strand) == 1) {
+  min(tx_coords$genomic_coding_start, na.rm = TRUE)
+} else {
+  max(tx_coords$genomic_coding_start, na.rm = TRUE)
+}
+
+
+```
+
+
+
+```{r}
+
+
+get_translation_start <- function(gene_symbol) {
+  # Connect to GRCh37 BioMart
+  ensembl <- useEnsembl(biomart = "ensembl",
+                        dataset = "hsapiens_gene_ensembl",
+                        GRCh = 37)
+  
+  # Step 1: Get canonical transcript (transcript_is_canonical must be alone)
+  canonical_tx <- getBM(
+    attributes = c("hgnc_symbol", "ensembl_transcript_id", "transcript_is_canonical"),
+    filters = "hgnc_symbol",
+    values = gene_symbol,
+    mart = ensembl
+  ) %>%
+    filter(transcript_is_canonical == 1) %>%
+    slice(1)
+  
+  if (nrow(canonical_tx) == 0) {
+    warning(paste("No canonical transcript found for", gene_symbol))
+    return(NULL)
+  }
+  
+  # Step 2: Get coding start info using that transcript
+  tx_details <- getBM(
+    attributes = c("ensembl_transcript_id", "genomic_coding_start", "strand", "chromosome_name"),
+    filters = "ensembl_transcript_id",
+    values = canonical_tx$ensembl_transcript_id,
+    mart = ensembl
+  )
+  
+  if (nrow(tx_details) == 0 || is.na(tx_details$genomic_coding_start)) {
+    warning(paste("No genomic_coding_start found for", gene_symbol))
+    return(NULL)
+  }
+
+  return(list(
+    gene = gene_symbol,
+    transcript = canonical_tx$ensembl_transcript_id,
+    chromosome = tx_details$chromosome_name,
+    strand = tx_details$strand,
+    translation_start = tx_details$genomic_coding_start
+  ))
+}
+
+
+get_translation_start("MET")
+
+```
+
+```{r Clean barplot for other oncogenes}
+
+utr_fusion_freq <- data.frame(
+  Oncogene = c("PDGFRA", "ETV1", "ROS1", "ERG", "ETV4", "JAK1", "KRAS", "ETV5", 
+               "EGFR", "MYCL", "PDGFRB", "FGFR3", "MYCN", "ABL1", "RET", "ERBB2", 
+               "NTRK1", "NTRK3", "MYC", "HRAS", "BRAF", "FGFR1", "JAK2", 
+               "NTRK2", "FGFR2", "ALK"),
+  Frequency = c(5.2, 5.0, 5.0, 12.5, 11.5, 0, 10.5, 8.0,
+                0, 0, 0, 0, 0, 0, 0, 0, 
+                0, 0, 0, 0, 0, 15.0, 8.0, 
+                6.0, 3.0))
+
+
+theme_nature <- theme_bw(base_family = "Arial", base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_text(size = 20), 
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title = element_text(size = 20, face = "bold"),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    legend.position = "none",
+    legend.key = element_blank(),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    panel.border = element_blank()
+  )
+
+
+
+# Sort data in descending order of frequency
+utr_fusion_freq_sorted <- utr_fusion_freq %>%
+  arrange(desc(Frequency)) %>%
+  mutate(Oncogene = factor(Oncogene, levels = Oncogene))  # preserve order in plot
+
+# Plot
+p <- ggplot(utr_fusion_freq_sorted, aes(x = Oncogene, y = Frequency, fill = Frequency)) +
+  geom_bar(stat = "identity", width = 0.7, color = "black") +
+  scale_fill_distiller(palette = "Blues", direction = 1) +
+  labs(
+    title = "Frequency of Fusions Replacing 5′ UTR",
+    x = NULL,
+    y = "% of UTR-Replacing Fusions among all Fusion events"
+  ) +
+  theme_nature
+
+ggsave("/Users/dogusaltintas/Library/Mobile Documents/com~apple~CloudDocs/Lab files/Comoglio/Manuscripts/MET Fusion partners/Manuscript Fusion/Figures/Fig6a.png", plot = p, width = 11, height = 4.5, dpi = 600)
+
+
+
+```
+

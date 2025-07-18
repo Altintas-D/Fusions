@@ -1,0 +1,333 @@
+---
+title: "Untitled"
+author: "Dogus Altintas"
+date: "2025-05-13"
+output: html_document
+---
+
+```{r}
+# Load libraries
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+# ===============================
+# 1. Input data: fusion_data2
+# ===============================
+fusion_data2 <- data.frame(
+  Group = c(
+    "-Irr -HGF Low", "-Irr -HGF High", "-Irr +HGF Low", "-Irr +HGF High",
+    "+Irr -HGF Low", "+Irr -HGF High", "+Irr +HGF Low", "+Irr +HGF High"
+  ),
+  WT = c(48, 48, 48, 48, 48, 47, 48, 43),
+  Fusion = c(0, 0, 0, 0, 0, 1, 0, 5)
+)
+
+# ===============================
+# 2. Extract experimental conditions
+# ===============================
+fusion_data2 <- fusion_data2 %>%
+  mutate(
+    Irradiation = ifelse(grepl("\\+Irr", Group), "+", "–"),
+    HGF = ifelse(grepl("\\+HGF", Group), "+", "–"),
+    MET = ifelse(grepl("Low", Group), "Low", "High")
+  )
+
+# ===============================
+# 3. Prepare for plotting
+# ===============================
+fusion_long <- fusion_data2 %>%
+  pivot_longer(cols = c(WT, Fusion), names_to = "Genotype", values_to = "Count") %>%
+  group_by(Group) %>%
+  mutate(Percent = Count / sum(Count) * 100) %>%
+  mutate(AxisLabel = paste0(Irradiation, "\n", MET, "\n", HGF))
+
+fusion_long$AxisLabel <- factor(fusion_long$AxisLabel, levels = unique(fusion_long$AxisLabel))
+
+# ===============================
+# 4. Statistical tests
+# ===============================
+
+# Chi-square
+chisq_result <- chisq.test(as.matrix(fusion_data2[, c("WT", "Fusion")]))
+p_chi <- chisq_result$p.value
+
+# Fisher's exact: +Irr vs -Irr
+p_irr <- fusion_data2 %>%
+  group_by(Irradiation) %>%
+  summarise(WT = sum(WT), Fusion = sum(Fusion)) %>%
+  column_to_rownames("Irradiation") %>%
+  as.matrix() %>%
+  fisher.test() %>%
+  .$p.value
+
+# Fisher's: HGF within +Irr
+p_hgf <- fusion_data2 %>%
+  filter(Irradiation == "+") %>%
+  group_by(HGF) %>%
+  summarise(WT = sum(WT), Fusion = sum(Fusion)) %>%
+  column_to_rownames("HGF") %>%
+  as.matrix() %>%
+  fisher.test() %>%
+  .$p.value
+
+# Fisher's: MET within +Irr
+p_met <- fusion_data2 %>%
+  filter(Irradiation == "+") %>%
+  group_by(MET) %>%
+  summarise(WT = sum(WT), Fusion = sum(Fusion)) %>%
+  column_to_rownames("MET") %>%
+  as.matrix() %>%
+  fisher.test() %>%
+  .$p.value
+
+
+# +Irr +HGF: MET Low vs MET High
+p_met_hgf <- fusion_data2 %>%
+  filter(Irradiation == "+", HGF == "+") %>%
+  group_by(MET) %>%
+  summarise(WT = sum(WT), Fusion = sum(Fusion)) %>%
+  column_to_rownames("MET") %>%
+  as.matrix() %>%
+  fisher.test() %>%
+  .$p.value
+
+# +Irr, MET High, –HGF vs +HGF
+p_met_high_hgf <- fusion_data2 %>%
+  filter(Irradiation == "+", MET == "High") %>%
+  group_by(HGF) %>%
+  summarise(WT = sum(WT), Fusion = sum(Fusion)) %>%
+  column_to_rownames("HGF") %>%
+  as.matrix() %>%
+  fisher.test() %>%
+  .$p.value
+
+
+
+# ===============================
+# 5. Nature-style theme
+# ===============================
+theme_nature <- theme_bw(base_family = "Arial", base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_text(size = 18, face = "bold"),
+    axis.title = element_text(size = 16, face = "bold"),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    legend.position = "right",
+    legend.key = element_blank(),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    panel.border = element_blank()
+  )
+
+
+```
+
+
+```{r}
+# ===============================
+# 6. Final Plot
+# ===============================
+p <- ggplot(fusion_long, aes(x = AxisLabel, y = Percent, fill = Genotype)) +
+  geom_bar(stat = "identity", color = "black", width = 0.7) +
+  scale_fill_manual(values = c("WT" = "gray70", "Fusion" = "#d62728")) +
+  labs(
+    x = NULL,
+    y = "Percentage of Cells",
+    title = "Fusion Frequency Across Experimental Groups"
+  ) +
+  
+  # Fusion % labels
+  geom_text(
+  data = fusion_long %>% filter(Genotype == "Fusion" & Percent > 0),
+  aes(label = paste0(round(Percent, 1), "%"),
+      y = 80),  # position slightly above Fusion bar
+  size = 4.5,
+  fontface = "bold"
+) +
+  
+  # Statistical annotations
+  # Irradiation (all groups)
+  annotate("text", x = 4.5, y = 148, 
+           label = paste0("Chi-square: P = ", signif(p_chi, 2) 
+                          ), 
+           size = 5, fontface = "italic") +
+  
+  # -Irr vs + Irr
+    geom_segment(aes(x = 1, xend = 8, y = 130, yend = 130)) +
+  annotate("text", x = 4.5, y = 135, 
+           label = paste0("Irradiation P = ", signif(p_irr, 2)), 
+           size = 5, fontface = "italic") +
+  
+  # HGF in +Irr
+  geom_segment(aes(x = 5, xend = 8, y = 118, yend = 118)) +
+  annotate("text", x = 6.5, y = 123, 
+           label = paste0("HGF P = ", signif(p_hgf, 2)), 
+           size = 5, fontface = "italic") +
+  
+  # MET in +Irr
+  geom_segment(aes(x = 5, xend = 8, y = 106, yend = 106)) +
+  annotate("text", x = 6.5, y = 111, 
+           label = paste0("MET P = ", signif(p_met, 2)), 
+           size = 5, fontface = "italic") +
+  
+  # MET Low vs High in +Irr +HGF: groups 7 (Low) vs 8 (High)
+geom_segment(aes(x = 7, xend = 8, y = 138, yend = 138)) +
+annotate("text", x = 7.5, y = 140, 
+         label = paste0("MET (+Irr +HGF) P = ", signif(p_met_hgf, 2)),
+         size = 5, fontface = "italic") +
+
+  # Right-side explanatory labels
+  annotate("text", x = 8.9, y = c(10, 25, 40),
+           label = c("HGF (10 ng/mL)", "MET level", "Irradiation (7 Gy)"),
+           hjust = 0, size = 5, fontface = "bold") +
+  
+  coord_cartesian(ylim = c(0, 150)) +
+  theme_nature +
+  theme(axis.text.x = element_text(lineheight = 1.4, size = 13))
+
+
+```
+
+
+```{r}
+# Filter for Fusion only
+fusion_only <- fusion_long %>% filter(Genotype == "Fusion")
+
+# Barplot
+p <- ggplot(fusion_only, aes(x = AxisLabel, y = Percent)) +
+  geom_bar(stat = "identity", fill = "#d62728", color = "black", width = 0.6) +
+   # Background shading for +Irr (bars 5–8)
+  annotate("rect", xmin = 4.5, xmax = 8.5, ymin = -Inf, ymax = Inf,
+           alpha = 0.15, fill = "#ff7f0e") +
+  
+    # Background shading for -Irr (bars 1–4)
+  annotate("rect", xmin = 0.5, xmax = 4.5, ymin = -Inf, ymax = Inf,
+           alpha = 0.15, fill = "#1f77b4") +
+  # Add percentage labels above bars
+  geom_text(aes(label = paste0(round(Percent, 1), "%")),
+            vjust = -0.5, size = 4.5, fontface = "bold") +
+  
+  # Add key statistical annotations (customize as needed)
+  annotate("text", x = 3, y = max(fusion_only$Percent) + 5,
+           label = paste0("Chi-square: P = ", signif(p_chi, 1)),
+           size = 5, fontface = "italic") +
+  
+  # Axes and theme
+  labs(
+    x = NULL,
+    y = "Fusion-Positive Cells (%)",
+    title = ""
+  ) +
+  ylim(0, max(fusion_only$Percent) + 7) +
+  theme_nature +
+  theme(axis.text.x = element_text(size = 13, lineheight = 1.2)) 
+
+
+ggsave("RACE_Results_Fusions.png", width = 8, height = 6, dpi = 600)
+
+```
+
+
+```{r}
+p <- ggplot(fusion_long, aes(x = AxisLabel, y = Percent, fill = Genotype)) +
+
+  # Background shading for +Irr (bars 5–8)
+  annotate("rect", xmin = 4.5, xmax = 8.5, ymin = -Inf, ymax = Inf,
+           alpha = 0.15, fill = "#ff7f0e") +
+  
+    # Background shading for -Irr (bars 1–4)
+  annotate("rect", xmin = 0.5, xmax = 4.5, ymin = -Inf, ymax = Inf,
+           alpha = 0.15, fill = "#1f77b4") +
+
+  # Bars
+  geom_bar(stat = "identity", color = "black", width = 0.7) +
+  scale_fill_manual(values = c("WT" = "gray70", "Fusion" = "#d62728")) +
+  
+  # Axis and title
+  labs(
+    x = NULL,
+    y = "Percentage of Cells",
+    title = "Fusion Frequency Across Experimental Groups"
+  ) +
+
+   # Fusion % labels
+  geom_text(
+  data = fusion_long %>% filter(Genotype == "Fusion" & Percent > 0),
+  aes(label = paste0(round(Percent, 1), "%"),
+      y = 80),  # position slightly above Fusion bar
+  size = 4.5,
+  fontface = "bold"
+) +
+
+  # Statistical Annotations
+  # Chi-square (overall)
+  annotate("text", x = 4.5, y = 148, 
+           label = paste0("Chi-square: P = ", signif(p_chi, 1)), 
+           size = 5, fontface = "italic") +
+
+  # –Irr vs +Irr (1–4 vs 5–8)
+  geom_segment(aes(x = 1, xend = 8, y = 130, yend = 130)) +
+  annotate("text", x = 4.5, y = 135, 
+           label = paste0("Irradiation effect P = ", signif(p_irr, 1)), 
+           size = 5, fontface = "italic") +
+  
+    # +Irr MET High: –HGF (Group 6) vs +HGF (Group 8)
+geom_segment(aes(x = 6, xend = 8, y = 118, yend = 118)) +
+annotate("text", x = 7, y = 123, 
+         label = paste0("HGF effect: P = ", signif(p_met_high_hgf, 1)),
+         size = 5, fontface = "italic") +
+
+  # +Irr +HGF MET High vs Low (7 vs 8)
+  geom_segment(aes(x = 7, xend = 8, y = 106, yend = 106)) +
+  annotate("text", x = 7.5, y = 111, 
+           label = paste0("MET effect P = ", signif(p_met_hgf, 1)), 
+           size = 5, fontface = "italic") +
+
+  # Right-side axis description
+  annotate("text", x = 8.9, y = c(10, 25, 40),
+           label = c("HGF (10 ng/mL)", "MET level", "Irradiation (7 Gy)"),
+           hjust = 0, size = 5, fontface = "bold") +
+
+
+  coord_cartesian(ylim = c(0, 155)) +
+  theme_nature +
+  theme(axis.text.x = element_text(lineheight = 1.4, size = 13))
+
+ggsave("RACE_Results_Fusions.png", width = 8, height = 6, dpi = 600)
+
+
+```
+
+```{r}
+library(flextable)
+
+utr_data <- read.csv(file.choose(), sep=";")
+
+colnames(utr_data) <- c(
+  "Donor Gene",
+  "MFE (kcal/mol)",
+  "5′ UTR Length (nt)",
+  "GC Content (%)",
+  "# uORFs",
+  "MET Breakpoint (bp from ATG)",
+  "Donor Breakpoint (bp from ATG)",
+  "Observed Condition"
+)
+
+
+utr_flextable <- flextable(utr_data) %>%
+  autofit() %>%
+  set_table_properties(layout = "autofit", width = .9) %>%
+  theme_booktabs() %>%
+  color(i = ~ `Donor Gene` != "RAC1", color = "firebrick") %>%
+  align(align = "center", part = "all") %>%
+  fontsize(size = 11, part = "all") %>%
+  set_caption("Characteristics of 5′ UTR-Replacing MET Fusions Identified by 5′RACE")
+
+```
+
+

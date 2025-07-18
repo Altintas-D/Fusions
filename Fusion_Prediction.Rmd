@@ -1,0 +1,244 @@
+---
+title: "Untitled"
+author: "Dogus Altintas"
+date: "2025-06-24"
+output: html_document
+---
+
+```{r}
+
+# Load required library
+library(dplyr)
+library(tibble)
+library(ggplot2)
+
+# 1. Input data manually (replace with actual data if available as file)
+utr_data <- tribble(
+  ~Gene,     ~Length, ~GC,    ~uORFs, ~MFE,
+  "ALK",       927,   66.02,     1,   -445.8,
+  "FGFR1",     743,   73.76,     2,   -393.7,
+  "FGFR2",     633,   69.67,     4,   -321.4,
+  "MYCL",      483,   76.60,     0,   -282.9,
+  "NTRK2",     532,   71.43,     2,   -267.9,
+  "MET",       396,   75.00,     2,   -227.7,
+  "JAK2",      467,   68.74,     3,   -224.6,
+  "PDGFRB",    455,   63.08,     0,   -186.5,
+  "FGFR3",     275,   84.73,     1,   -185.8,
+  "MYC",       363,   65.29,     0,   -157.8,
+  "MYCN",      311,   70.42,     0,   -144.5,
+  "NTRK3",     314,   68.15,     2,   -143.8,
+  "JAK1",      294,   68.71,     0,   -142.7,
+  "ETV4",      207,   77.78,     0,   -117.6,
+  "ABL1",      193,   84.46,     1,   -114.6,
+  "EGFR",      261,   77.78,     0,   -112.7,
+  "ETV1",      388,   45.88,     3,   -108.6,
+  "KRAS",      190,   77.37,     0,   -95.1,
+  "ETV5",      224,   66.07,     0,   -94.1,
+  "HRAS",      188,   82.45,     0,   -89.7,
+  "RET",       190,   78.95,     1,   -86.7,
+  "BRAF",      226,   81.42,     0,   -82.1,
+  "ERBB2",     175,   79.43,     1,   -76.2,
+  "ROS1",      286,   35.66,     3,   -55.0,
+  "NRAS",      131,   58.78,     0,   -46.3,
+  "NTRK1",      70,   80.00,     0,   -36.0,
+  "PDGFRA",    135,   50.37,     1,   -28.1,
+  "ERG",        97,   30.93,     0,   -12.2
+)
+
+# 2. Calculate z-scores and Complexity Score
+utr_scores <- utr_data %>%
+  mutate(
+    z_Length = scale(Length)[,1],
+    z_GC = scale(GC)[,1],
+    z_MFE = scale(MFE)[,1],
+    z_uORF = scale(uORFs)[,1],
+    Complexity_Score = z_Length + z_GC + (-z_MFE) + z_uORF   # negative MFE since lower = more structured
+  )
+
+# 3. Print table with scores
+print(utr_scores %>% select(Gene, z_Length, z_GC, z_MFE, Complexity_Score))
+
+# 4. Optional: Visualize Complexity Score
+ggplot(utr_scores, aes(x = reorder(Gene, -Complexity_Score), y = Complexity_Score)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "5′ UTR Complexity Score per Oncogene",
+       x = "Gene",
+       y = "Complexity Score (Z-scaled features)") +
+  theme_nature
+
+
+```
+
+
+```{r}
+fusion_data <- tribble(
+  ~Gene,     ~Fusion_Prevalence,
+  "PDGFRA",  5.3,
+  "ETV1",    5.1,
+  "ROS1",    0,
+  "ERG",     0,
+  "ETV4",    13,
+  "JAK1",    11.5,
+  "KRAS",    11.5,
+  "ETV5",    8,
+  "EGFR",    0,
+  "MYCL",    0,
+  "PDGFRB",  0,
+  "FGFR3",   0,
+  "MYCN",    0,
+  "ABL1",    0,
+  "RET",     0,
+  "ERBB2",   0,
+  "NRAS",    0,
+  "NTRK1",   0,
+  "MYC",     0,
+  "HRAS",    0,
+  "BRAF",    0,
+  "MET",     22,
+  "FGFR1",   16,
+  "JAK2",    8,
+  "NTRK2",   6,
+  "FGFR2",   4,
+  "ALK",     2
+)
+```
+
+
+```{r}
+# 4. Merge datasets
+merged <- utr_scores %>%
+  inner_join(fusion_data, by = "Gene")
+
+# 5. Correlation analysis
+cor_result <- cor.test(merged$Complexity_Score, merged$Fusion_Prevalence, method = "pearson")
+print(cor_result)
+
+# 6. Optional: visualize
+ggplot(merged, aes(x = Complexity_Score, y = Fusion_Prevalence, label = Gene)) +
+  geom_point(color = "blue", size = 3) +
+  geom_text(nudge_y = 1.5, size = 3) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred", linetype = "dashed") +
+  labs(
+    title = "Correlation Between 5′ UTR Complexity and Fusion Prevalence",
+    x = "5′ UTR Complexity Score (z-scaled)",
+    y = "% of 5′ UTR-Replacing Fusions"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+glm_model <- glm(Fusion_Present ~ Complexity_Score, data = merged, family = "binomial")
+summary(glm_model)
+
+ggplot(merged, aes(x = Complexity_Score, y = Fusion_Present)) +
+  geom_point(alpha = 0.5) +
+  stat_smooth(method = "glm", method.args = list(family = "binomial"), color = "blue") +
+  labs(title = "Observed and Predicted Fusion by 5′ UTR Complexity")
+```
+
+```{r}
+# Predict probabilities
+merged$Predicted <- predict(glm_model, type = "response")
+
+# Plot predicted probabilities vs. complexity
+library(ggplot2)
+ggplot(merged, aes(x = Complexity_Score, y = Predicted)) +
+  geom_point() +
+  geom_smooth(method = "loess", color = "blue") +
+  labs(
+    title = "Predicted Probability of Fusion by 5′ UTR Complexity",
+    x = "UTR Complexity Score (z-scaled)",
+    y = "Predicted Probability of UTR-Replacing Fusion"
+  ) + theme_nature
+
+exp(coef(glm_model)["Complexity_Score"])
+
+ggplot(merged, aes(x = Complexity_Score, y = Fusion_Present)) +
+  geom_point(position = position_jitter(height = 0.05), alpha = 0.6) +
+  stat_smooth(method = "glm", method.args = list(family = "binomial"),
+              color = "darkred", se = F) +
+  labs(
+    title = "Fusion Probability vs. 5′ UTR Complexity",
+    x = "5'UTR Complexity Score",
+    y = "Predicted Probability of 5'UTR-Replacing Fusion"
+  ) +
+  annotate("text", x = min(merged$Complexity_Score), y = 0.9,
+           label = "Logistic regression:\nOR = 1.50, p = 0.041\nn = 27",
+           hjust = 0, size = 4) +
+theme_nature
+
+```
+
+
+```{r}
+# Fit the linear regression model
+lm_model <- lm(Fusion_Prevalence ~ Complexity_Score, data = merged)
+summary(lm_model)  # to extract p-value and R²
+
+# Extract values for annotation
+p_val <- summary(lm_model)$coefficients[2, 4]
+r2_val <- summary(lm_model)$r.squared
+
+# Format p and R² for annotation text
+p_label <- ifelse(p_val < 0.001, "p < 0.001", paste0("p = ", signif(p_val, 2)))
+r2_label <- paste0("R² = ", signif(r2_val, 2))
+
+# Plot: linear regression of fusion prevalence vs. UTR complexity
+library(ggplot2)
+
+ggplot(merged, aes(x = Complexity_Score, y = Fusion_Prevalence)) +
+  geom_point(size = 2, color = "black") +
+  geom_smooth(method = "lm", color = "darkred", fill = "pink", se = TRUE) +
+  annotate("text", x = min(merged$Complexity_Score), y = max(merged$Fusion_Prevalence),
+           label = paste("Linear regression:", r2_label, ",", p_label),
+           hjust = 0, vjust = 1, size = 4) +
+  labs(
+    title = "Supplementary Figure: Fusion Prevalence vs. 5′ UTR Complexity",
+    x = "5′ UTR Complexity Score (z-scaled)",
+    y = "% of UTR-Replacing Fusions"
+  ) +
+theme_nature
+```
+
+
+```{r}
+library(pROC)
+# Get predicted probabilities from logistic model
+merged$Predicted_Prob <- predict(glm_model, type = "response")
+
+# Generate ROC object
+roc_obj <- roc(merged$Fusion_Present, merged$Predicted_Prob)
+auc_val <- auc(roc_obj)  # Extract AUC
+
+# Plot
+plot(roc_obj, col = "steelblue", lwd = 3,
+     main = "Panel D: ROC Curve — Fusion Classification by 5′ UTR Complexity")
+
+# Add diagonal (random classifier reference)
+abline(a = 0, b = 1, lty = 2, col = "gray40")
+
+# Annotate AUC value on the plot
+text(0.6, 0.2, labels = paste0("AUC = ", round(auc_val, 3)), cex = 1.2)
+```
+
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

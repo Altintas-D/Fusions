@@ -1,0 +1,326 @@
+---
+title: "Viability cell lines post 7 Gy Irradiation EC50 HGF"
+author: "Dogus Altintas"
+date: "2025-05-09"
+output: html_document
+---
+
+```{r Libraries and wd}
+library(tidyverse)
+library(drc)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+library(rstatix)
+library(scales)  # for alpha()
+library(purrr)
+
+
+
+setwd("/Users/daltinta/Library/Mobile Documents/com~apple~CloudDocs/Lab files/Comoglio/Manuscripts/MET Fusion partners/Viability post-irradiation 05052025/Viability HGF + Tepo Dose response 7Gy 09052025/RAW data")
+```
+
+
+
+```{r}
+# Define base colors for each cell line
+cell_colors <- c(
+  SNU245 = "#1f77b4",   # blue
+  JHUEM7 = "#d62728",   # red
+  SW756  = "#FF7F0E",   # nature-style orange
+  A172   = "#000000",   # black
+  LN405  = "#7f7f7f"    # gray
+)
+  # Set colors
+  color_control <- cell_colors[[cell_line]]
+  color_tepo <- alpha(color_control, 0.5)
+colors_treatment <- c("Control" = color_control, "Tepotinib" = color_tepo)
+
+
+theme_nature <- theme_bw(base_family = "Arial", base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_text(size = 16),
+    axis.title = element_text(size = 16, face = "bold"),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    legend.position = "right",
+    legend.key = element_blank(),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    panel.border = element_blank()
+  )
+
+process_cell_line <- function(file_path) {
+  library(scales)
+  cell_line <- str_remove(basename(file_path), ".txt")
+
+  # Set colors
+  color_control <- cell_colors[[cell_line]]
+  color_tepo <- alpha(color_control, 0.5)
+  colors_treatment <- c("Control" = color_control, "Tepotinib" = color_tepo)
+
+  # Load and reshape
+  df_raw <- read.delim(file_path, check.names = FALSE)
+  colnames(df_raw)[-1] <- make.unique(colnames(df_raw)[-1], sep = "_")
+
+  df_long <- df_raw %>%
+    pivot_longer(-`HGF (ng/ml)`, names_to = "Condition", values_to = "Survival") %>%
+    mutate(
+      Treatment = ifelse(str_detect(Condition, "Tepotinib"), "Tepotinib", "Control"),
+      Replicate = as.integer(as.factor(Condition))
+    ) %>%
+    rename(HGF_ng_ml = `HGF (ng/ml)`) %>%
+    dplyr::select(HGF_ng_ml, Survival, Treatment, Replicate)
+
+  # Normalize to 0 HGF
+  base_survival <- df_long %>%
+    filter(HGF_ng_ml == 0) %>%
+    dplyr::select(Treatment, Replicate, BaseSurvival = Survival)
+
+  df_norm <- df_long %>%
+    left_join(base_survival, by = c("Treatment", "Replicate")) %>%
+    mutate(NormSurvival = Survival / BaseSurvival)
+
+  # Fit models
+  model_control <- drm(NormSurvival ~ HGF_ng_ml, data = filter(df_norm, Treatment == "Control"), fct = LL.4())
+  model_tepo    <- drm(NormSurvival ~ HGF_ng_ml, data = filter(df_norm, Treatment == "Tepotinib"), fct = LL.4())
+
+  # Prediction
+  pred_data <- data.frame(HGF_ng_ml = 10^seq(log10(0.1), log10(200), length.out = 200))
+  control_preds <- predict(model_control, newdata = pred_data)
+  tepo_preds <- predict(model_tepo, newdata = pred_data)
+
+  pred_df <- bind_rows(
+    pred_data %>% mutate(NormSurvival = as.vector(control_preds), Treatment = "Control"),
+    pred_data %>% mutate(NormSurvival = as.vector(tepo_preds), Treatment = "Tepotinib")
+  )
+
+  # Summary stats
+  df_sem_raw <- df_long %>%
+    group_by(HGF_ng_ml, Treatment) %>%
+    summarise(Mean_raw = mean(Survival), SEM_raw = sd(Survival) / sqrt(n()), .groups = "drop")
+
+  baseline <- df_sem_raw %>%
+    filter(HGF_ng_ml == 0) %>%
+    dplyr::select(Treatment, Mean_base = Mean_raw)
+
+  df_sem_norm <- df_sem_raw %>%
+    left_join(baseline, by = "Treatment") %>%
+    mutate(
+      Mean = Mean_raw / Mean_base,
+      SEM = SEM_raw / Mean_base
+    ) %>%
+    dplyr::select(HGF_ng_ml, Treatment, Mean, SEM)
+
+  # EC50 and plateau
+  ec50_ctrl <- tryCatch(ED(model_control, 50, interval = "delta"), error = function(e) rep(NA, 3))
+  plateau <- tryCatch(coef(model_control)["Upper"], error = function(e) NA)
+  ec50_val <- as.numeric(ec50_ctrl[1])
+  y_50 <- as.numeric(plateau) / 2
+
+  # Statistics
+  df_norm$Group <- df_norm$Treatment
+  model_combined <- drm(NormSurvival ~ HGF_ng_ml, curveid = Group, data = df_norm, fct = LL.4(), separate = TRUE)
+  model_shared <- drm(NormSurvival ~ HGF_ng_ml, data = df_norm, fct = LL.4())
+
+  anova_df <- as.data.frame(anova(model_shared, model_combined))
+  p_value <- anova_df$`p value`[which(!is.na(anova_df$`p value`))]
+  p_label <- paste0("F-test: p = ", format.pval(p_value, digits = 3, eps = .Machine$double.eps))
+
+  # Plot
+  p <- ggplot(df_sem_norm, aes(x = HGF_ng_ml, y = Mean, color = Treatment)) +
+    geom_point(size = 2.5) +
+    geom_errorbar(aes(ymin = pmax(Mean - SEM, 0), ymax = Mean + SEM), width = 0.1, alpha = 0.7) +
+    geom_line(data = pred_df, aes(y = NormSurvival), size = 1) +
+    # Dashed EC50 lines
+    {if (!is.na(ec50_val)) geom_vline(xintercept = ec50_val, linetype = "dashed", color = color_control, linewidth = 0.7)} +
+    {if (!is.na(y_50)) geom_hline(yintercept = y_50, linetype = "dashed", color = "black", linewidth = 0.5)} +
+    labs(
+      title = cell_line,
+      x = "HGF (ng/mL, log10 scale)",
+      y = "Normalized Survival"
+    ) +
+    annotate("text", x = 1, y = max(df_sem_norm$Mean, na.rm = TRUE) + 0.2, label = p_label, size = 5, hjust = 0) +
+    scale_color_manual(values = colors_treatment) +
+    scale_fill_manual(values = colors_treatment) +
+    scale_x_log10(breaks = c(0.1, 1, 10, 100, 200),
+              labels = scales::label_number(accuracy = 1)) +
+    coord_cartesian(ylim = c(
+      min(df_sem_norm$Mean - df_sem_norm$SEM, na.rm = TRUE),
+      max(df_sem_norm$Mean + df_sem_norm$SEM, na.rm = TRUE) + 0.2
+    )) +
+    theme_nature
+
+  return(list(plot = p, ec50 = tibble(CellLine = cell_line, EC50 = ec50_val, CI_lower = ec50_ctrl[2], CI_upper = ec50_ctrl[3])))
+}
+
+```
+
+
+```{r}
+file_paths <- c(
+  A172   = "A172.txt",
+  LN405  = "LN405.txt",
+  JHUEM7 = "JHUEM7.txt",
+  SW756  = "SW756.txt",
+  SNU245 = "SNU245.txt"
+)
+
+results <- map(file_paths, process_cell_line)
+plots <- map(results, "plot")
+ec50_df <- bind_rows(map(results, "ec50"))
+
+# Show one plot
+print(plots[[1]])
+
+# Or save each
+walk2(plots, file_paths, ~ ggsave(paste0(tools::file_path_sans_ext(.y), "_curve.png"), .x, width = 8, height = 6, dpi = 600))
+
+```
+
+
+
+```{r}
+ec50_df$N <- 6
+
+ec50_df <- ec50_df %>%
+  mutate(
+    SEM = abs((CI_upper - CI_lower)) / (2 * 1.96)
+  )
+
+
+ec50_df <- ec50_df %>%
+  mutate(SD = abs(SEM * sqrt(N)))
+
+
+
+
+# Expand into pseudo raw data (simulate replicates)
+ec50_data <- ec50_df %>%
+  rowwise() %>%
+  mutate(ReplicateEC50 = list(rnorm(N, EC50, SD))) %>%
+  unnest(ReplicateEC50)
+
+# ANOVA + Tukey HSD
+anova_res <- ec50_data %>%
+  anova_test(ReplicateEC50 ~ CellLine)
+
+tukey_res <- ec50_data %>%
+  tukey_hsd(ReplicateEC50 ~ CellLine)
+
+# Format p-values for ggplot
+pvals <- tukey_res %>%
+  mutate(
+    group1 = group1,
+    group2 = group2,
+    p.label = case_when(
+      p.adj < 0.001 ~ "***",
+      p.adj < 0.01 ~ "**",
+      p.adj < 0.05 ~ "*",
+      TRUE ~ "NS"
+    ),
+    y.position = max(ec50_df$EC50 + ec50_df$SEM) + 5 + 5 * row_number()
+  ) %>%
+  dplyr::select(group1, group2, p.label, y.position, p.adj)
+
+# Ensure numeric values are valid
+pvals <- pvals %>%
+  mutate(
+    p.adj = as.numeric(p.adj),
+    p.label = case_when(
+      p.adj < 0.001 ~ "***",
+      p.adj < 0.01 ~ "**",
+      p.adj < 0.05 ~ "*",
+      TRUE ~ "NS"
+    )
+  )
+
+
+pvals$y.position = c(55, 60, 65, 70, 75, 80, 85, 90, 95, 100)
+
+
+
+
+
+theme_nature <- theme_bw(base_family = "Arial", base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_text(size = 16),
+    axis.text.x = element_text(size=16, face="bold"),
+    axis.title = element_text(size = 16, face = "bold"),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    legend.position = "none",
+    legend.key = element_blank(),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    panel.border = element_blank()
+  )
+
+ec50_df$CellLine <- factor(ec50_df$CellLine, levels=c("A172", "LN405", "JHUEM7", "SNU245", "SW756"))
+
+# Barplot with error bars + significance
+
+```
+
+```{r}
+cell_colors <- c(
+  A172   = "#000000",
+  LN405  = "#7f7f7f",
+  JHUEM7 = "#d62728",
+  SNU245 = "#1f77b4",
+  SW756  = "#FF7F0E",
+  `50 ng/mL HGF + Tepotinib` = NA  # dummy legend entry for spacing
+)
+
+ec50_plot <- ggplot(ec50_df, aes(x = CellLine, y = EC50, fill = CellLine)) +
+  # Background shading for +Irr (bars 5–8)
+  annotate("rect", xmin = 2.5, xmax = 5.5, ymin = -Inf, ymax = Inf,
+           alpha = 0.25, fill = "#d62728") +
+  
+    # Background shading for -Irr (bars 1–4)
+  annotate("rect", xmin = 0.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+           alpha = 0.05, fill = "#000000") +
+  
+  geom_col() +
+  
+  geom_errorbar(aes(ymin = EC50 - SEM, ymax = EC50 + SEM), width = 0.2) +
+  
+  scale_fill_manual(
+    values = cell_colors,
+    breaks = names(cell_colors), 
+    labels = c("A172", "B", "C", "50 ng/mL HGF + Tepotinib", "D", "E")# force all entries into the legend
+  )  +
+  
+  labs(title = "Sensitivity to HGF, Post-irradiation",
+    y = "EC50 (ng/mL)", x = NULL) +
+  theme_nature +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  # Bracket A172 vs JHUEM7
+  geom_segment(aes(x = 1, xend = 3, y = 58, yend = 58)) +
+  annotate("text", x = 2, y = 60, label = "P = 6.89e-14", size = 5, fontface = "italic") +
+  
+    # Bracket A172 vs SNU245
+  geom_segment(aes(x = 1, xend = 4, y = 65, yend = 65)) +
+  annotate("text", x = 2, y = 67, label = "P = 3.65e-14", size = 5, fontface = "italic") +
+
+  # Bracket A172 vs SW756
+  geom_segment(aes(x = 1, xend = 5, y = 72, yend = 72)) +
+  annotate("text", x = 3, y = 74, label = "P = 7.45e-13", size = 5, fontface = "italic") +
+  
+  
+  
+  theme(
+    legend.position = "right",       # Force legend space
+    legend.title = element_blank()
+  ) +
+  guides(fill = guide_legend(override.aes = list(color = NA)))  # Dummy guide
+
+
+
+ggsave("EC50_HGF_Barplot_PostIrradiation.tiff", ec50_plot, width = 8, height = 6, dpi = 600)
+```
+
